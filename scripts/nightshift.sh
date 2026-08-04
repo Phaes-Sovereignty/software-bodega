@@ -107,9 +107,15 @@ run_visible() { # -> exit code; output to $1
 }
 
 test_counts() { # crude pass/total from the receipt, best-effort
-  local out="$1" p t
-  p=$(grep -cE '^(ok|PASS|passed)' "$out" 2>/dev/null || echo 0)
-  t=$(grep -cE '^(ok|not ok|PASS|FAIL)' "$out" 2>/dev/null || echo 0)
+  # No `|| echo 0`: grep -c prints 0 and exits 1 when it matches nothing, which
+  # would append a second zero and corrupt the progress.md line.
+  local out="$1" p t ran
+  ran=$(grep -oE '^Ran ([0-9]+) test' "$out" 2>/dev/null | grep -oE '[0-9]+' | head -1)
+  if [ -n "$ran" ]; then
+    printf '%s/%s' "$(( ran - $(fail_count "$out") ))" "$ran"; return
+  fi
+  p=$(grep -cE '^(ok|PASS|passed)' "$out" 2>/dev/null); p="${p:-0}"
+  t=$(grep -cE '^(ok|not ok|PASS|FAIL)' "$out" 2>/dev/null); t="${t:-0}"
   [ "$t" = "0" ] && { printf '?/?'; return; }
   printf '%s/%s' "$p" "$t"
 }
