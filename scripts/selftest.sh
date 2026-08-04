@@ -108,8 +108,62 @@ grep -q "sparse-checkout" scripts/runner.sh && ok "runner.sh excludes heldout/ b
 grep -q "HELDOUT_TESTS" .github/workflows/factory.yml && ok "CI fetches held-out suite from secrets" \
   || bad "CI has no held-out fetch"
 
-# --- 6. headless adapters --------------------------------------------------
-head_ "6. Headless adapter smoke tests"
+# --- 6. CI workflow --------------------------------------------------------
+head_ "6. CI workflow"
+if python3 - <<'PY' 2>/dev/null
+import yaml, sys
+d = yaml.safe_load(open('.github/workflows/factory.yml'))
+j = d['jobs']
+assert set(j) == {'build','visible','heldout','scope','review'}, f"job set: {sorted(j)}"
+assert j['review']['needs'] == ['visible','heldout','scope'], "review must gate on all three"
+PY
+then ok "factory.yml parses; job graph correct"; else bad "factory.yml invalid or job graph wrong"; fi
+
+# Every run: block must be valid shell. A YAML block scalar silently swallows
+# under-indented lines, which is how a broken script reaches CI looking fine.
+if python3 - <<'PY' 2>/dev/null
+import yaml, subprocess, tempfile, os, sys
+d = yaml.safe_load(open('.github/workflows/factory.yml'))
+bad = []
+for jn, j in d['jobs'].items():
+    for i, s in enumerate(j['steps']):
+        if 'run' not in s: continue
+        src = s['run'].replace('${{', '$OPEN').replace('}}', '')
+        with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False) as f:
+            f.write(src); p = f.name
+        r = subprocess.run(['bash', '-n', p], capture_output=True, text=True)
+        if r.returncode: bad.append(f"{jn}.step[{i}]")
+        os.unlink(p)
+sys.exit(1 if bad else 0)
+PY
+then ok "every CI run-block parses as bash"; else bad "a CI run-block is not valid shell"; fi
+
+# The scope check must reject a diff that strays outside the declared manifest.
+_scope() {
+  printf '%s\n' "$2" | sort -u > "$T1"
+  printf '%s\n' "$1" | sed -n '/Files changed:/,/^$/p' | sed -n 's/^[[:space:]]*-[[:space:]]*//p' | sort -u > "$T2"
+  [ -s "$T2" ] || return 1
+  comm -23 "$T1" "$T2" | grep -q . && return 1
+  printf '%s\n' "$1" | grep -q "Other behavior changes:" || return 1
+  return 0
+}
+T1="$(mktemp)"; T2="$(mktemp)"
+BODY_OK='Files changed:
+- src/a.py
+- tests/test_a.py
+
+Other behavior changes: None'
+_scope "$BODY_OK" "src/a.py
+tests/test_a.py" && ok "scope check accepts an in-manifest diff" || bad "scope check rejects a clean diff"
+_scope "$BODY_OK" "src/a.py
+src/sneaky.py" && bad "scope check accepted an out-of-manifest file" || ok "scope check rejects an undeclared file"
+_scope "no manifest here" "src/a.py" && bad "scope check accepted a body with no manifest" || ok "scope check rejects a missing manifest"
+_scope 'Files changed:
+- src/a.py' "src/a.py" && bad "scope check accepted a missing ledger line" || ok "scope check rejects a missing ledger line"
+rm -f "$T1" "$T2"
+
+# --- 7. headless adapters --------------------------------------------------
+head_ "7. Headless adapter smoke tests"
 if [ "$OFFLINE" = "1" ]; then
   printf '  \033[33m–\033[0m skipped (--offline)\n'
 else

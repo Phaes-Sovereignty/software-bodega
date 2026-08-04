@@ -134,27 +134,41 @@ jobs:
           S: ${{ needs.scope.result }}
         run: |
           # Artifact-only context: contract + diff + receipts. Never a transcript.
-          DIFF="$(git diff "${{ github.event.pull_request.base.sha }}".."$SHA" | head -c 60000)"
-          RECEIPTS="$(cat receipts/*/*.log 2>/dev/null | head -c 20000)"
+          PR=${{ github.event.pull_request.number }}
+          BASE=${{ github.event.pull_request.base.sha }}
           if [ "$V" != "success" ] || [ "$H" != "success" ] || [ "$S" != "success" ]; then
-            gh pr comment "${{ github.event.pull_request.number }}" --body \
-              "Verdict on $SHA: NOT DONE
-
-CI evidence incomplete or failing — visible=$V heldout=$H scope=$S.
-Missing evidence never counts as green."
+            {
+              printf 'Verdict on %s: NOT DONE\n\n' "$SHA"
+              printf 'CI evidence incomplete or failing — visible=%s heldout=%s scope=%s.\n' "$V" "$H" "$S"
+              printf 'Missing evidence never counts as green.\n'
+            } > verdict.txt
+            gh pr comment "$PR" --body-file verdict.txt
             exit 0
           fi
           if [ -z "$ANTHROPIC_API_KEY" ]; then
-            gh pr comment "${{ github.event.pull_request.number }}" --body \
-              "Verdict on $SHA: mechanical gates GREEN (visible, held-out, scope).
-Judge review skipped: no ANTHROPIC_API_KEY configured."
+            {
+              printf 'Verdict on %s: mechanical gates GREEN (visible, held-out, scope).\n\n' "$SHA"
+              printf 'Judge review skipped: no ANTHROPIC_API_KEY configured.\n'
+            } > verdict.txt
+            gh pr comment "$PR" --body-file verdict.txt
             exit 0
           fi
           npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || true
-          PROMPT="$(cat skills/inspector/SKILL.md
-                    printf '\n===== CONTRACT =====\n'; cat factory/CONTRACT.md 2>/dev/null
-                    printf '\n===== DIFF =====\n%s\n' "$DIFF"
-                    printf '\n===== TEST RECEIPTS =====\n%s\n' "$RECEIPTS"
-                    printf '\nReview this PR. First line must be exactly: Verdict on %s: SHIP|FIX FIRST|NOT DONE\n' "$SHA")"
-          claude -p "$PROMPT" --output-format json 2>/dev/null | jq -r '.result // "Verdict on '"$SHA"': NOT DONE (judge call failed)"' > verdict.txt
-          head -c 60000 verdict.txt | gh pr comment "${{ github.event.pull_request.number }}" --body-file -
+          {
+            cat skills/inspector/SKILL.md
+            printf '\n===== CONTRACT =====\n'
+            cat factory/CONTRACT.md 2>/dev/null
+            printf '\n===== DIFF =====\n'
+            git diff "$BASE".."$SHA" | head -c 60000
+            printf '\n===== TEST RECEIPTS =====\n'
+            cat receipts/*/*.log 2>/dev/null | head -c 20000
+            printf '\nReview this PR from these artifacts only.\n'
+            printf 'Your first line must be exactly: Verdict on %s: SHIP|FIX FIRST|NOT DONE\n' "$SHA"
+          } > prompt.txt
+          claude -p --output-format json < prompt.txt 2>/dev/null \
+            | jq -r '.result // empty' > verdict.txt
+          if [ ! -s verdict.txt ]; then
+            printf 'Verdict on %s: NOT DONE\n\nJudge call failed — no verdict produced. Missing evidence is not a pass.\n' "$SHA" > verdict.txt
+          fi
+          head -c 60000 verdict.txt > verdict.trim && mv verdict.trim verdict.txt
+          gh pr comment "$PR" --body-file verdict.txt
