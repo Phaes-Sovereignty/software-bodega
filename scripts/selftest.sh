@@ -107,6 +107,13 @@ grep -q "sparse-checkout" scripts/runner.sh && ok "runner.sh excludes heldout/ b
   || bad "runner.sh does not seal heldout/"
 grep -q "HELDOUT_TESTS" .github/workflows/factory.yml && ok "CI fetches held-out suite from secrets" \
   || bad "CI has no held-out fetch"
+# The physical proof: build a worker worktree and assert heldout/ is not there.
+if SEAL_OUT="$(bash scripts/tests/test-seal.sh 2>&1)"; then
+  printf '%s\n' "$SEAL_OUT" | grep "✓" | sed 's/^/  /'
+  while IFS= read -r l; do case "$l" in *"✓"*) PASS=$((PASS+1));; esac; done <<< "$SEAL_OUT"
+else
+  printf '%s\n' "$SEAL_OUT" | sed 's/^/  /'; bad "seal tests failed"
+fi
 
 # --- 6. CI workflow --------------------------------------------------------
 head_ "6. CI workflow"
