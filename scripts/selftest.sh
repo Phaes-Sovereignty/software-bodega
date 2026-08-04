@@ -207,14 +207,19 @@ TASK_ID: T00
 STATUS: DONE
 SUMMARY: adapter reachable
 ---END---'
-  for role in executor planner judge plan_judge; do
-    O="$(mktemp)"
-    if run_role "$role" "$PROBE" > "$O" 2>/dev/null && status_valid "$O" 2>/dev/null; then
+  # fallback is the last escalation rung, not a required adapter: an outage
+  # there degrades the ladder, it does not stop a night. Warn, do not fail.
+  for role in executor planner judge plan_judge fallback; do
+    O="$(mktemp)"; E="$(mktemp)"
+    if run_role "$role" "$PROBE" > "$O" 2>"$E" && status_valid "$O" 2>/dev/null; then
       ok "$role ($(role_family "$role")) returned a parseable status block"
+    elif [ "$role" = "fallback" ]; then
+      printf '  \033[33m–\033[0m %s (%s) UNAVAILABLE — escalation rung only: %s\n' \
+        "$role" "$(role_family "$role")" "$(head -c 90 "$E" | tr '\n' ' ')"
     else
       bad "$role ($(role_family "$role")) failed: $(head -c 120 "$O" | tr '\n' ' ')"
     fi
-    rm -f "$O"
+    rm -f "$O" "$E"
   done
   # Regression: every real worker prompt starts with a skill file's YAML
   # frontmatter, so the first characters are `---`. An arg-mode CLI parses that

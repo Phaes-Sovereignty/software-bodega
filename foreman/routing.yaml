@@ -14,7 +14,7 @@ families:
   anthropic: [claude, claude-*]
   xai:       [grok, grok-*]
   openai:    [codex, codex-*, gpt-*]
-  moonshot:  [kimi, kimi-*]
+  moonshot:  [kimi, kimi-*, k3, k3-*]   # k3 does NOT match kimi-*
 
 roles:
   executor:
@@ -42,6 +42,11 @@ roles:
     family: xai
     cmd: ["omp", "-p", "--no-session", "--model", "grok-4.5"]
     input: arg
+  fallback:
+    model: k3
+    family: moonshot          # a fourth family, reached only by escalation
+    cmd: ["omp", "-p", "--no-session", "--model", "k3"]
+    input: arg
 
 # Independence invariants. Each is (judge_role, author_role): the two must never
 # resolve to the same family. Checked at startup and before every judged gate.
@@ -57,6 +62,9 @@ escalation:
     - {strategy: resample, role: executor, n: 3, select: execution}
     - {strategy: single,   role: planner}
     - {strategy: single,   role: plan_judge}
+    # Last rung: a fourth family. If resample and two other families all failed
+    # the same verify, trying the same families again is not a new hypothesis.
+    - {strategy: single,   role: fallback}
 
 # Ceilings. Exactly ONE of these may block; the other observes and warns.
 # Two blocking ceilings means a night can die for a reason nobody chose.

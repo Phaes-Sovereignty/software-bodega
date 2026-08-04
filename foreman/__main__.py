@@ -73,10 +73,19 @@ def cmd_init(args) -> int:
         return 1
     if args.probe:
         print("  adapter contract tests:")
+        w = Workers(router)
         try:
-            for role, status in Workers(router).preflight().items():
+            for role, status in w.preflight().items():
                 print(f"    {role:11s} {status}")
-        except (ContractTestFailed, AdapterError) as e:
+        except ContractTestFailed as e:
+            # Print per-role results BEFORE the summary: "something failed" with
+            # no reason is the least useful possible output from a preflight.
+            for role in w.REQUIRED_ROLES + w.OPTIONAL_ROLES:
+                if role in getattr(e, "report", {}):
+                    print(f"    {role:11s} {e.report[role]}")
+            print(f"    -> {e}")
+            return 1
+        except AdapterError as e:
             print(f"    {e}")
             return 1
     if not (root / "factory/STATE.md").exists():

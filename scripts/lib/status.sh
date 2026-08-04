@@ -117,6 +117,7 @@ role_cmd() {
     plan_judge) printf '%s' "${PLAN_JUDGE_CMD:-}" ;;
     glue)       printf '%s' "${GLUE_CMD:-}" ;;
     triage)     printf '%s' "${TRIAGE_CMD:-}" ;;
+    fallback)   printf '%s' "${FALLBACK_CMD:-}" ;;
     *) return 2 ;;
   esac
 }
@@ -129,6 +130,7 @@ role_family() {
     plan_judge) printf '%s' "${PLAN_JUDGE_FAMILY:-}" ;;
     glue)       printf '%s' "${GLUE_FAMILY:-}" ;;
     triage)     printf '%s' "${TRIAGE_FAMILY:-}" ;;
+    fallback)   printf '%s' "${FALLBACK_FAMILY:-}" ;;
     *) return 2 ;;
   esac
 }
@@ -153,6 +155,7 @@ role_input_mode() {
     plan_judge) printf '%s' "${PLAN_JUDGE_INPUT:-stdin}" ;;
     glue)       printf '%s' "${GLUE_INPUT:-arg}" ;;
     triage)     printf '%s' "${TRIAGE_INPUT:-stdin}" ;;
+    fallback)   printf '%s' "${FALLBACK_INPUT:-arg}" ;;
     *) printf 'stdin' ;;
   esac
 }

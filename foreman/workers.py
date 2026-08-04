@@ -240,20 +240,38 @@ class Workers:
                 f"status={res.status_block.status!r} station={res.status_block.station!r}")
         return res
 
-    def preflight(self, roles: list[str] | None = None) -> dict[str, str]:
-        """Every adapter must pass before the night shift is allowed to start."""
+    # Roles the night cannot run without. `fallback` is deliberately absent: it
+    # is the last rung of the escalation ladder, reached only after a resample
+    # and two other families have all failed the same verify. Refusing to start
+    # a night because the fourth-string reserve is unavailable would trade a
+    # certain loss for a hypothetical one.
+    REQUIRED_ROLES = ["executor", "planner", "judge", "plan_judge"]
+    OPTIONAL_ROLES = ["fallback"]
+
+    def preflight(self, roles: list[str] | None = None,
+                  optional: list[str] | None = None) -> dict[str, str]:
+        """Contract-test every adapter. Required failures block; optional warn."""
         self.router.validate()
-        roles = roles or ["executor", "planner", "judge", "plan_judge"]
+        required = roles or list(self.REQUIRED_ROLES)
+        opt = optional if optional is not None else list(self.OPTIONAL_ROLES)
         report: dict[str, str] = {}
         failures: list[str] = []
-        for r in roles:
+        for r in required + [o for o in opt if o in self.router._roles]:
             try:
                 res = self.contract_test(r)
                 report[r] = f"ok ({self.router.family(r)}, {res.wall_s:.1f}s)"
             except (AdapterError, ContractTestFailed) as e:
-                report[r] = f"FAILED: {e}"
-                failures.append(r)
+                short = str(e).replace("\n", " ")[:160]
+                if r in opt:
+                    # Degraded, not broken: record it and let the night proceed.
+                    report[r] = f"UNAVAILABLE (escalation rung only): {short}"
+                else:
+                    report[r] = f"FAILED: {short}"
+                    failures.append(r)
         if failures:
-            raise ContractTestFailed(
-                f"adapters failed preflight: {failures} — refusing to start the night")
+            exc = ContractTestFailed(
+                f"required adapters failed preflight: {failures} — "
+                f"refusing to start the night")
+            exc.report = report          # so callers can show per-role detail
+            raise exc
         return report
