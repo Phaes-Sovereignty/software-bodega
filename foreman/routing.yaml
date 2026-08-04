@@ -2,6 +2,13 @@
 #
 # Prompt files name roles, never models. Upgrading a model is an edit here plus
 # models.env; no prompt changes, no code changes.
+#
+# RUNTIME: oh-my-pi (omp) for every role. One binary serving four families means
+# the command no longer tells you the provider, so `family` below is pinned from
+# --model and MUST stay in step with it. `omp -p` with no --model falls back to
+# grok-4.5, which would quietly put judge and executor in the same family.
+# The families table still resolves these ids by glob, so family_of_model()
+# keeps working for ledger rows that carry a raw model name.
 
 families:
   anthropic: [claude, claude-*]
@@ -11,33 +18,29 @@ families:
 
 roles:
   executor:
-    model: grok
+    model: grok-build
     family: xai
-    cmd: ["grok", "-p"]
-    input: arg          # grok rejects stdin; prompt goes as an argument
+    cmd: ["omp", "-p", "--no-session", "--model", "grok-build"]
+    input: arg          # omp takes the prompt as an argument; stdin is not used
   planner:
-    model: claude
+    model: claude-opus-5
     family: anthropic
-    cmd: ["claude", "-p", "--output-format", "json",
-          "--permission-mode", "acceptEdits",
-          "--allowedTools", "Write,Edit,Read,Bash,Glob,Grep"]
-    input: stdin        # --allowedTools is variadic and would eat a trailing arg
+    cmd: ["omp", "-p", "--no-session", "--model", "claude-opus-5"]
+    input: arg
   judge:
-    model: claude
+    model: claude-opus-5
     family: anthropic
-    cmd: ["claude", "-p", "--output-format", "json",
-          "--permission-mode", "acceptEdits",
-          "--allowedTools", "Write,Edit,Read,Bash,Glob,Grep"]
-    input: stdin
+    cmd: ["omp", "-p", "--no-session", "--model", "claude-opus-5"]
+    input: arg
   plan_judge:
-    model: codex
+    model: gpt-5.6-sol
     family: openai
-    cmd: ["codex", "exec", "--skip-git-repo-check"]
-    input: stdin
+    cmd: ["omp", "-p", "--no-session", "--model", "gpt-5.6-sol"]
+    input: arg
   glue:
-    model: grok
+    model: grok-4.5
     family: xai
-    cmd: ["grok", "-p"]
+    cmd: ["omp", "-p", "--no-session", "--model", "grok-4.5"]
     input: arg
 
 # Independence invariants. Each is (judge_role, author_role): the two must never
