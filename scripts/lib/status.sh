@@ -145,20 +145,47 @@ assert_cross_family() {
   return 0
 }
 
+role_input_mode() {
+  case "$1" in
+    executor)   printf '%s' "${EXECUTOR_INPUT:-arg}" ;;
+    planner)    printf '%s' "${PLANNER_INPUT:-stdin}" ;;
+    judge)      printf '%s' "${JUDGE_INPUT:-stdin}" ;;
+    plan_judge) printf '%s' "${PLAN_JUDGE_INPUT:-stdin}" ;;
+    glue)       printf '%s' "${GLUE_INPUT:-arg}" ;;
+    triage)     printf '%s' "${TRIAGE_INPUT:-stdin}" ;;
+    *) printf 'stdin' ;;
+  esac
+}
+
 # run_role ROLE PROMPT : invoke a role headless, print normalized model text.
 # Normalizes claude's --output-format json envelope down to .result.
+#
+# Prompt delivery differs per CLI and is declared in models.env, not sniffed:
+#   stdin — required for claude (its --allowedTools is variadic and would eat a
+#           trailing prompt argument) and safe for codex.
+#   arg   — required for grok, which errors on an empty prompt argument.
 run_role() {
-  local role="$1" prompt="$2" cmd raw rc
+  local role="$1" prompt="$2" cmd raw rc mode err
   cmd="$(role_cmd "$role")" || { echo "unknown role: $role" >&2; return 2; }
   [ -n "$cmd" ] || { echo "no command configured for role: $role" >&2; return 2; }
+  mode="$(role_input_mode "$role")"
+  err="$(mktemp)"
   local -a argv=()
   read -r -a argv <<< "$cmd"
-  raw="$("${argv[@]}" "$prompt" 2>/dev/null)"; rc=$?
+  if [ "$mode" = "stdin" ]; then
+    raw="$(printf '%s' "$prompt" | "${argv[@]}" 2>"$err")"; rc=$?
+  else
+    raw="$("${argv[@]}" "$prompt" 2>"$err")"; rc=$?
+  fi
   if [ $rc -ne 0 ]; then
-    echo "role '$role' exited $rc" >&2
+    # Adapter failures are loud. A silent empty result becomes a bogus gate
+    # failure three stations downstream, which is far more expensive to debug.
+    echo "role '$role' exited $rc: $(head -c 300 "$err" | tr '\n' ' ')" >&2
+    rm -f "$err"
     printf '%s' "$raw"
     return $rc
   fi
+  rm -f "$err"
   case "$cmd" in
     *"--output-format json"*)
       local parsed
