@@ -221,37 +221,68 @@ PY
     [ -s factory/HANDOFF.md ] || die "work order produced no HANDOFF.md"
     echo "[bootstrap] ✓ plan_gate ($(jq '.slices|length' factory/.planning/plan.json) slices)" >&2
 
-    # ◈ cross-family plan review — mandatory independence check
+    # ◈ cross-family plan review — mandatory independence check.
+    # A REJECT is repairable: the planner gets the review back and revises, up to
+    # PLAN_REVISE_CAP rounds (hard rule 4), then it escalates to the human. Each
+    # round is a fresh verdict bound to the NEW plan SHA; old verdicts are stale
+    # by construction because the SHA moved.
     assert_cross_family plan_judge planner || die "plan reviewer shares a family with the plan author"
-    PLAN_SHA="$(git hash-object factory/.planning/plan.json)"
-    echo "[bootstrap] === plan_review (plan_judge, artifact-only) ===" >&2
-    REVIEW_OUT="$RUN/plan_review.out"
-    run_role plan_judge "$(
-      printf 'You are reviewing a work-order plan. Artifact-only: you get the plan\n'
-      printf 'and the contract, no transcript and no implementation notes.\n\n'
-      printf 'Check each slice: does the warrant actually support the claim? Is any\n'
-      printf 'slice marked strong that should be weak? Is any rebuttal missing a real\n'
-      printf 'failure mode? Is the file manifest inside the task boundary?\n\n'
-      printf 'Your FIRST LINE must be exactly:\n'
-      printf 'Verdict on plan@%s: APPROVE | APPROVE WITH NOTES | REJECT\n\n' "$PLAN_SHA"
-      printf 'Then per-slice notes, briefly.\n\n'
-      printf '===== PLAN =====\n'; cat factory/.planning/plan.json
-      printf '\n===== CONTRACT =====\n'; cat factory/CONTRACT.md
-    )" > "$REVIEW_OUT" 2>>factory/log.md
-    VERDICT="$(grep -m1 -oE 'Verdict on plan@[0-9a-f]+: *(APPROVE WITH NOTES|APPROVE|REJECT)' "$REVIEW_OUT" | head -1)"
+    PLAN_REVISE_CAP="${PLAN_REVISE_CAP:-2}"
+    round=0
     mkdir -p factory/.planning/gate-results
-    jq -n --arg v "${VERDICT:-UNPARSEABLE}" --arg sha "$PLAN_SHA" \
-          --arg judge "$(role_family plan_judge)" --arg author "$(role_family planner)" \
-          --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-      '{gate:"plan_review",sha:$sha,verdict:$v,judge_family:$judge,author_family:$author,ts:$ts,
-        pass:($v|test("APPROVE"))}' \
-      > "factory/.planning/gate-results/plan_review-$PLAN_SHA.json"
-    echo "[bootstrap] plan_review: ${VERDICT:-<unparseable>}" >&2
-    case "$VERDICT" in
-      *REJECT) die "plan_review REJECTED the work order" ;;
-      "")      echo "[bootstrap] warning: plan review verdict unparseable — treating as needs-human" >&2 ;;
-    esac
-    log_append "plan_review" "verdict" "${VERDICT:-unparseable}"
+    while :; do
+      PLAN_SHA="$(git hash-object factory/.planning/plan.json)"
+      echo "[bootstrap] === plan_review round $round (plan_judge, artifact-only) ===" >&2
+      REVIEW_OUT="$RUN/plan_review-r$round.out"
+      run_role plan_judge "$(
+        printf 'You are reviewing a work-order plan. Artifact-only: you get the plan\n'
+        printf 'and the contract, no transcript and no implementation notes.\n\n'
+        printf 'Check each slice: does the warrant actually support the claim? Is any\n'
+        printf 'slice marked strong that should be weak? Is any rebuttal missing a real\n'
+        printf 'failure mode? Is the file manifest inside the task boundary?\n\n'
+        printf 'Your FIRST LINE must be exactly:\n'
+        printf 'Verdict on plan@%s: APPROVE | APPROVE WITH NOTES | REJECT\n\n' "$PLAN_SHA"
+        printf 'Then per-slice notes, briefly.\n\n'
+        printf '===== PLAN =====\n'; cat factory/.planning/plan.json
+        printf '\n===== CONTRACT =====\n'; cat factory/CONTRACT.md
+      )" > "$REVIEW_OUT" 2>>factory/log.md
+      VERDICT="$(grep -m1 -oE 'Verdict on plan@[0-9a-f]+: *(APPROVE WITH NOTES|APPROVE|REJECT)' "$REVIEW_OUT" | head -1)"
+      jq -n --arg v "${VERDICT:-UNPARSEABLE}" --arg sha "$PLAN_SHA" --arg r "$round" \
+            --arg judge "$(role_family plan_judge)" --arg author "$(role_family planner)" \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{gate:"plan_review",sha:$sha,round:($r|tonumber),verdict:$v,judge_family:$judge,
+          author_family:$author,ts:$ts,pass:($v|test("APPROVE"))}' \
+        > "factory/.planning/gate-results/plan_review-$PLAN_SHA.json"
+      echo "[bootstrap] plan_review: ${VERDICT:-<unparseable>}" >&2
+      log_append "plan_review" "round$round" "${VERDICT:-unparseable}"
+
+      case "$VERDICT" in
+        *APPROVE*) break ;;
+      esac
+      if [ "$round" -ge "$PLAN_REVISE_CAP" ]; then
+        die "plan_review did not approve after $PLAN_REVISE_CAP revision round(s) — needs a human"
+      fi
+      round=$((round + 1))
+      echo "[bootstrap] === plan revision round $round (planner) ===" >&2
+      run_station "workorder-revise-$round" planner "$(
+        printf 'Your work-order plan was REJECTED by an independent reviewer from a\n'
+        printf 'different model family. Revise factory/.planning/plan.json to address\n'
+        printf 'every point below.\n\n'
+        printf 'Rules for the revision:\n'
+        printf '  - Fix the substance. Do NOT just downgrade qualifiers to weak to make\n'
+        printf '    objections go away — a claim the warrant cannot support must change.\n'
+        printf '  - If a manifest falls outside its task boundary, either move the file\n'
+        printf '    into the right slice or fix the boundary in factory/tasks/<id>.md\n'
+        printf '    and say so.\n'
+        printf '  - Keep the schema identical. Update factory/HANDOFF.md if a slice changed.\n\n'
+        printf '===== REVIEWER VERDICT =====\n'; cat "$REVIEW_OUT"
+        printf '\n===== CURRENT PLAN =====\n'; cat factory/.planning/plan.json
+        printf '\n===== CONTRACT =====\n'; cat factory/CONTRACT.md
+        printf '\nRewrite factory/.planning/plan.json now, then end with the status block.\n'
+      )"
+      python3 scripts/lib/schemas.py plan factory/.planning/plan.json \
+        || die "revised plan.json failed schema validation"
+    done
     ;;
   esac
 done
