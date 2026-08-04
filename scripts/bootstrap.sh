@@ -69,7 +69,7 @@ run_station() { # run_station <name> <role> <prompt>
   fi
 }
 
-ORDER="interview spec blueprint exam workorder"
+ORDER="interview spec blueprint exam workorder planreview"
 started=0
 
 for STAGE in $ORDER; do
@@ -220,7 +220,12 @@ PY
     python3 scripts/lib/schemas.py plan factory/.planning/plan.json || die "plan.json failed schema validation"
     [ -s factory/HANDOFF.md ] || die "work order produced no HANDOFF.md"
     echo "[bootstrap] ✓ plan_gate ($(jq '.slices|length' factory/.planning/plan.json) slices)" >&2
+    ;;
 
+  planreview)
+    # Resume point: plan.json already exists and passed plan_gate. Re-authoring a
+    # plan just to re-review it costs ~30 minutes for nothing.
+    python3 scripts/lib/schemas.py plan factory/.planning/plan.json || die "plan.json failed schema validation"
     # ◈ cross-family plan review — mandatory independence check.
     # A REJECT is repairable: the planner gets the review back and revises, up to
     # PLAN_REVISE_CAP rounds (hard rule 4), then it escalates to the human. Each
