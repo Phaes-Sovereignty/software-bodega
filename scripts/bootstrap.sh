@@ -35,6 +35,18 @@ done
 RUN="$FACTORY_ROOT/factory/.planning/station-logs"
 mkdir -p "$RUN"
 
+# Single-writer lock. Two bootstraps racing on the same factory/ silently
+# interleave station writes and corrupt artifacts — observed during the Phase B
+# dry run when a long station outlived its caller. mkdir is atomic.
+LOCK="$FACTORY_ROOT/factory/.planning/.bootstrap.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "[bootstrap] another bootstrap holds the lock: $LOCK" >&2
+  echo "[bootstrap] pid $(cat "$LOCK/pid" 2>/dev/null || echo '?'). If it is dead, rm -rf the lock dir." >&2
+  exit 1
+fi
+echo "$$" > "$LOCK/pid"
+trap 'rm -rf "$LOCK" 2>/dev/null' EXIT INT TERM
+
 die() {
   echo "[bootstrap] GATE FAILED: $*" >&2
   log_append "bootstrap" "gate_failed" "$*"
