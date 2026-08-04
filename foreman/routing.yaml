@@ -1,0 +1,76 @@
+# routing.yaml — the ONLY place model identities live at Phase C.
+#
+# Prompt files name roles, never models. Upgrading a model is an edit here plus
+# models.env; no prompt changes, no code changes.
+
+families:
+  anthropic: [claude, claude-*]
+  xai:       [grok, grok-*]
+  openai:    [codex, codex-*, gpt-*]
+  moonshot:  [kimi, kimi-*]
+
+roles:
+  executor:
+    model: grok
+    family: xai
+    cmd: ["grok", "-p"]
+    input: arg          # grok rejects stdin; prompt goes as an argument
+  planner:
+    model: claude
+    family: anthropic
+    cmd: ["claude", "-p", "--output-format", "json",
+          "--permission-mode", "acceptEdits",
+          "--allowedTools", "Write,Edit,Read,Bash,Glob,Grep"]
+    input: stdin        # --allowedTools is variadic and would eat a trailing arg
+  judge:
+    model: claude
+    family: anthropic
+    cmd: ["claude", "-p", "--output-format", "json",
+          "--permission-mode", "acceptEdits",
+          "--allowedTools", "Write,Edit,Read,Bash,Glob,Grep"]
+    input: stdin
+  plan_judge:
+    model: codex
+    family: openai
+    cmd: ["codex", "exec", "--skip-git-repo-check"]
+    input: stdin
+  glue:
+    model: grok
+    family: xai
+    cmd: ["grok", "-p"]
+    input: arg
+
+# Independence invariants. Each is (judge_role, author_role): the two must never
+# resolve to the same family. Checked at startup and before every judged gate.
+independence:
+  - [judge, executor]        # the inspector must not share a family with the builder
+  - [plan_judge, planner]    # the plan reviewer must not share one with the author
+
+# Escalation ladder. Triggered ONLY by a verify failure — never by a low
+# confidence score, a long runtime, or an agent asking to be escalated.
+escalation:
+  trigger: verify_failure_only
+  ladder:
+    - {strategy: resample, role: executor, n: 3, select: execution}
+    - {strategy: single,   role: planner}
+    - {strategy: single,   role: plan_judge}
+
+# Ceilings. Exactly ONE of these may block; the other observes and warns.
+# Two blocking ceilings means a night can die for a reason nobody chose.
+ceilings:
+  rounds:
+    limit: 40
+    action: block
+  tokens:
+    limit: 4000000
+    action: warn
+    warn_at: 0.8
+
+timeouts:
+  role_seconds: 3600        # a station that has genuinely stopped making progress
+  probe_seconds: 180        # startup adapter contract test
+
+paths:
+  heldout: factory/tests/heldout
+  visible_runner: factory/tests/run-visible.sh
+  heldout_runner: factory/tests/run-heldout.sh

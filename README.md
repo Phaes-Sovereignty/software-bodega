@@ -99,6 +99,39 @@ Independence invariants, enforced by `assert_cross_family` in
 `scripts/lib/status.sh`: the judge must not share a family with the executor,
 and the plan reviewer must not share one with the plan's author.
 
+## The foreman (Phase C)
+
+Once `foreman/` exists it owns station transitions for the **bootstrap pipeline
+only**. The Small Loop stays scripts + CI forever, and the night loop keeps its
+own semantics — the foreman invokes `nightshift.sh`, it does not replace it.
+
+```bash
+python -m foreman init --probe   # validate routing, contract-test every adapter
+python -m foreman status         # where the line is and what is blocking it
+python -m foreman gate spec      # run a gate, record the verdict, transition
+python -m foreman gate --gc      # discard verdicts not bound to a live artifact
+python -m foreman launch         # night shift in a SEALED worktree
+python -m foreman resume         # continue after a crash or a BLOCKED state
+python -m foreman debrief --notify
+```
+
+What the foreman adds that prompts and scripts could not enforce:
+
+| Module | The property it makes mechanical |
+|---|---|
+| `fsm.py` | Transitions are an enumerated table. Skipping the exam board is not a policy violation — it is a transition that does not exist. |
+| `contracts.py` | Verdicts are keyed by content SHA. Edit an approved artifact and its approval is gone, automatically. |
+| `contracts.py` | The seal is **physical**: worker sandboxes are sparse-checkout worktrees with the held-out directory absent from disk. |
+| `gates.py` | Gates are pure functions over artifacts. The exam gate runs the suite itself, twice — a flaky green is a finding. |
+| `router.py` | A same-family judge **raises**. A soft failure here yields a verdict indistinguishable from a real one. |
+| `ledger.py` | Exactly one ceiling blocks (rounds); tokens observe and warn. Two blocking ceilings means a night dies for a reason nobody chose. |
+| `steps.py` | `kill -9` costs one step, not a night. Memoized by (step, input SHA). |
+| `breakers.py` | 3 parks stop the night; 3 empty diffs park a task; the same error 5× parks; 30-minute cooldown then one half-open retry. |
+| `workers.py` | One `invoke(role, work_order)`. Judges are structurally incapable of receiving Implementation Notes. |
+
+Run the suite with `python3 -m unittest foreman.tests.test_foreman` (47 tests),
+or `bash scripts/selftest.sh` for everything.
+
 ## Scripts
 
 | Script | What it does |
@@ -135,7 +168,10 @@ Recorded per §5. Each is the smallest working alternative.
 5. **`scripts/bootstrap.sh` and `scripts/inspect.sh` are additions** to the §2
    tree. The spec names the stations but not a driver for them; without one, the
    pipeline can only be run by hand. Phase C's foreman replaces `bootstrap.sh`.
-6. **A REJECT from the ◈ plan review is repairable.** The planner gets the review
+6. **`foreman/` is ~1,990 lines, not the ~700 the spec estimated.** The extra
+   is mostly docstrings explaining *why* each invariant exists and the adapter
+   quirks Phase B uncovered. No module was added beyond the ten specified.
+7. **A REJECT from the ◈ plan review is repairable.** The planner gets the review
    back and revises, capped at `PLAN_REVISE_CAP` (2) rounds, then escalates to a
    human — hard rule 4 applied to plans. Without this a single REJECT is a dead
    end. The revision prompt forbids resolving objections by downgrading

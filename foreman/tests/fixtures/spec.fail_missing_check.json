@@ -1,0 +1,165 @@
+{
+ "actors": [
+  "developer"
+ ],
+ "criteria": [
+  {
+   "id": "AC-1",
+   "check": "cli",
+   "text": "Running the command with a duration in minutes as its argument (e.g. `pomo 25`) starts a 25-minute work interval in the foreground: the command does not return until the interval completes, and it exits 0 on completion.",
+   "from": [
+    "D-1",
+    "D-2"
+   ]
+  },
+  {
+   "id": "AC-2",
+   "text": "A duration argument that is not a positive integer number of minutes (`0`, `-5`, `2.5`, `abc`, missing) is rejected at argument-parse time: non-zero exit code, message on stderr, no countdown rendered, and no line appended to the log.",
+   "from": [
+    "D-2"
+   ]
+  },
+  {
+   "id": "AC-3",
+   "check": "cli",
+   "text": "While an interval is running, stdout shows the remaining time and that display updates at least once per second.",
+   "from": [
+    "D-3"
+   ]
+  },
+  {
+   "id": "AC-4",
+   "check": "cli",
+   "text": "When an interval completes, a summary line for the completed interval is printed on stdout and the output tells the user, in plain text, to take a break.",
+   "from": [
+    "D-3",
+    "D-9"
+   ]
+  },
+  {
+   "id": "AC-5",
+   "check": "test",
+   "text": "An interval ends within 1 second of `start + duration` measured on the wall clock, and stays accurate when the process is stalled mid-interval (SIGSTOP for N seconds then SIGCONT): after resuming, the remaining time reflects true elapsed wall-clock time rather than the number of sleeps performed.",
+   "from": [
+    "D-4"
+   ]
+  },
+  {
+   "id": "AC-6",
+   "check": "test",
+   "text": "Pausing an interval with T remaining and later resuming it continues the countdown from T (within 1 second): it does not restart from the full duration, and the wall-clock time spent paused is not deducted from T.",
+   "from": [
+    "D-8"
+   ]
+  },
+  {
+   "id": "AC-7",
+   "check": "test",
+   "text": "Across 10 pause/resume cycles within one interval, the interval ends within 1 second of `duration` of accumulated running (unpaused) time \u2014 repeated cycles introduce no cumulative drift.",
+   "from": [
+    "D-8"
+   ]
+  },
+  {
+   "id": "AC-8",
+   "check": "cli",
+   "text": "Completing an interval appends exactly one new tab-separated line to `~/.pomo/log.tsv`; all bytes of the file that existed before the interval started are unchanged.",
+   "from": [
+    "D-5",
+    "D-6"
+   ]
+  },
+  {
+   "id": "AC-9",
+   "check": "cli",
+   "text": "If `~/.pomo/` or `~/.pomo/log.tsv` does not exist when an interval completes, they are created and the record is still written \u2014 a missing directory or file never causes a completed interval to be lost.",
+   "from": [
+    "D-5",
+    "D-6"
+   ]
+  },
+  {
+   "id": "AC-10",
+   "check": "type",
+   "text": "Every line in `~/.pomo/log.tsv` has the same fixed number of tab-separated fields, contains no embedded tab or newline characters within a field, and the file ends with a newline.",
+   "from": [
+    "D-5",
+    "D-7"
+   ]
+  },
+  {
+   "id": "AC-11",
+   "check": "test",
+   "text": "After the process is SIGKILLed at an arbitrary point mid-interval, `~/.pomo/log.tsv` contains no partial or truncated line (it still satisfies AC-10), and every interval that completed before the kill is still present in the file.",
+   "from": [
+    "D-6",
+    "D-7"
+   ]
+  },
+  {
+   "id": "AC-12",
+   "check": "test",
+   "text": "An interval that is killed or interrupted before completing appends no line to `~/.pomo/log.tsv` \u2014 only completed intervals are logged.",
+   "from": [
+    "D-6",
+    "D-7"
+   ]
+  },
+  {
+   "id": "AC-13",
+   "check": "cli",
+   "text": "After the command exits, no process spawned by it remains running and no listening socket is open \u2014 the timer exists only for the lifetime of the foreground command.",
+   "from": [
+    "D-1",
+    "NG-7"
+   ]
+  }
+ ],
+ "non_goals": [
+  {
+   "id": "NG-1",
+   "text": "No GUI of any kind \u2014 terminal only."
+  },
+  {
+   "id": "NG-2",
+   "text": "No system notifications (no OS notification center, no toasts)."
+  },
+  {
+   "id": "NG-3",
+   "text": "No sound or audible alarm."
+  },
+  {
+   "id": "NG-4",
+   "text": "No cross-device sync \u2014 the log lives on one machine and stays there."
+  },
+  {
+   "id": "NG-5",
+   "text": "No task, project, or tag tracking \u2014 the tool records intervals, nothing about what the interval was for."
+  },
+  {
+   "id": "NG-6",
+   "text": "No database \u2014 the log is a plain-text TSV file."
+  },
+  {
+   "id": "NG-7",
+   "text": "No daemon or background/server process \u2014 the timer only runs while the command is in the foreground."
+  }
+ ],
+ "open_questions": [
+  {
+   "id": "OQ-1",
+   "blocks": [
+    "AC-6",
+    "AC-7"
+   ],
+   "text": "The brief does not say how the user pauses and resumes (keypress on stdin? SIGTSTP/SIGCONT? a second command?). AC-6 and AC-7 are written mechanism-agnostically and become executable once the control is chosen, but that interface choice is not in the brief."
+  },
+  {
+   "id": "OQ-2",
+   "blocks": [
+    "AC-10"
+   ],
+   "text": "The brief does not specify the columns of the TSV record. AC-10 constrains record well-formedness (fixed field count, no embedded tabs or newlines) without naming fields. The brief's stated purpose \u2014 \"so you can see what you actually did\" \u2014 implies at least a completion timestamp and a duration, but the exact column set is unspecified."
+  }
+ ]
+}

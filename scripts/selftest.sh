@@ -179,8 +179,24 @@ else
   bad "night-shift loop tests failed"
 fi
 
-# --- 8. headless adapters --------------------------------------------------
-head_ "8. Headless adapter smoke tests"
+# --- 8. foreman (Phase C) --------------------------------------------------
+if [ -d foreman ]; then
+  head_ "8. Foreman (Phase C)"
+  if FO="$(python3 -m unittest foreman.tests.test_foreman 2>&1)"; then
+    n="$(printf '%s' "$FO" | grep -oE 'Ran [0-9]+ tests' | grep -oE '[0-9]+')"
+    ok "foreman unit suite: ${n:-?} tests pass"
+    PASS=$((PASS + ${n:-0} - 1))
+  else
+    printf '%s\n' "$FO" | tail -20 | sed 's/^/  /'
+    bad "foreman unit suite failed"
+  fi
+  if python3 -m foreman --root . status >/dev/null 2>&1; then
+    ok "foreman CLI runs against this repo"
+  else bad "foreman CLI failed"; fi
+fi
+
+# --- 9. headless adapters --------------------------------------------------
+head_ "9. Headless adapter smoke tests"
 if [ "$OFFLINE" = "1" ]; then
   printf '  \033[33m–\033[0m skipped (--offline)\n'
 else

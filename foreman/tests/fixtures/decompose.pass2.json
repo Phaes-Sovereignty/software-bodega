@@ -1,0 +1,225 @@
+{
+ "tasks": [
+  {
+   "id": "T00",
+   "goal": "Amend the ADRs, task files and blueprint that contradict CONTRACT section 0 (conflicts C-2..C-6), marking the superseded text superseded and naming the section that overrides it, so every document a builder reads first agrees with the contract.",
+   "boundary": [
+    "factory/adr/ADR-1.md",
+    "factory/adr/ADR-2.md",
+    "factory/adr/ADR-3.md",
+    "factory/tasks/T00.md",
+    "factory/tasks/T01.md",
+    "factory/tasks/T02.md",
+    "factory/tasks/T03.md",
+    "factory/tasks/T04.md",
+    "factory/tasks/T05.md",
+    "factory/BLUEPRINT.md",
+    "factory/HANDOFF.md",
+    "factory/.planning/decompose.json",
+    "factory/.planning/plan.json",
+    "scripts/lib/check_amendments.py"
+   ],
+   "depends": [],
+   "exam_refs": [],
+   "context_estimate": 9000,
+   "risk": "low",
+   "backlog": false
+  },
+  {
+   "id": "T01",
+   "goal": "Walking skeleton: `pomo <minutes>` runs a foreground interval end to end \u2014 live countdown on stdout, completion summary telling the user to take a break, exit 0 \u2014 resolved from a clean checkout with no install step.",
+   "boundary": [
+    "pomo",
+    "pyproject.toml",
+    "src/pomo/__init__.py",
+    "src/pomo/__main__.py",
+    "src/pomo/cli.py",
+    "src/pomo/session.py",
+    "tests/test_health.py"
+   ],
+   "depends": [
+    "T00"
+   ],
+   "exam_refs": [
+    "AC-1",
+    "AC-3",
+    "AC-4",
+    "AC-13"
+   ],
+   "context_estimate": 9000,
+   "risk": "low",
+   "backlog": false
+  },
+  {
+   "id": "T02",
+   "goal": "Reject any duration argument that is not a positive integer number of minutes at parse time, with a stderr message and a non-zero exit, before any countdown renders.",
+   "boundary": [
+    "src/pomo/cli.py",
+    "tests/test_args.py"
+   ],
+   "depends": [
+    "T00",
+    "T01"
+   ],
+   "exam_refs": [
+    "AC-2"
+   ],
+   "context_estimate": 9000,
+   "risk": "low",
+   "backlog": false
+  },
+  {
+   "id": "T03",
+   "goal": "Derive remaining time from a monotonic deadline instead of accumulated sleeps, so a mid-interval SIGSTOP/SIGCONT stall does not move the end time.",
+   "boundary": [
+    "src/pomo/clock.py",
+    "src/pomo/session.py",
+    "tests/test_clock.py"
+   ],
+   "depends": [
+    "T00",
+    "T01"
+   ],
+   "exam_refs": [
+    "AC-5"
+   ],
+   "context_estimate": 9000,
+   "risk": "high",
+   "adr": "ADR-1",
+   "backlog": false
+  },
+  {
+   "id": "T04",
+   "goal": "Pausing freezes the remaining time and resuming continues from exactly that remaining time, with no cumulative drift across repeated cycles.",
+   "boundary": [
+    "src/pomo/clock.py",
+    "src/pomo/control.py",
+    "src/pomo/session.py",
+    "tests/test_pause.py"
+   ],
+   "depends": [
+    "T00",
+    "T03"
+   ],
+   "exam_refs": [
+    "AC-6",
+    "AC-7"
+   ],
+   "context_estimate": 9000,
+   "risk": "high",
+   "adr": "ADR-2",
+   "backlog": false
+  },
+  {
+   "id": "T05",
+   "goal": "On completion only, append exactly one well-formed four-column TSV record to ~/.pomo/log.tsv in a single atomic O_APPEND write, creating the directory and file if absent.",
+   "boundary": [
+    "src/pomo/log.py",
+    "src/pomo/session.py",
+    "tests/test_log.py"
+   ],
+   "depends": [
+    "T00",
+    "T04"
+   ],
+   "exam_refs": [
+    "AC-8",
+    "AC-9",
+    "AC-10",
+    "AC-11",
+    "AC-12"
+   ],
+   "context_estimate": 9000,
+   "risk": "high",
+   "adr": "ADR-3",
+   "backlog": false
+  },
+  {
+   "id": "B-01",
+   "goal": "Detect a non-TTY stdout and emit one plain line per tick instead of redrawing in place, so `pomo 25 | tee` and CI logs stay readable.",
+   "boundary": [
+    "src/pomo/render.py",
+    "src/pomo/session.py"
+   ],
+   "depends": [
+    "T01"
+   ],
+   "exam_refs": [],
+   "context_estimate": 9000,
+   "risk": "low",
+   "backlog": true
+  },
+  {
+   "id": "B-02",
+   "goal": "Add a `pomo log` subcommand that reads ~/.pomo/log.tsv back and prints today's completed intervals with a total.",
+   "boundary": [
+    "src/pomo/cli.py",
+    "src/pomo/log.py"
+   ],
+   "depends": [
+    "T05"
+   ],
+   "exam_refs": [],
+   "context_estimate": 9000,
+   "risk": "low",
+   "backlog": true
+  },
+  {
+   "id": "B-03",
+   "goal": "Honour a POMO_LOG environment variable to override the ~/.pomo/log.tsv path.",
+   "boundary": [
+    "src/pomo/log.py"
+   ],
+   "depends": [
+    "T05"
+   ],
+   "exam_refs": [],
+   "context_estimate": 9000,
+   "risk": "low",
+   "backlog": true
+  },
+  {
+   "id": "B-04",
+   "goal": "On SIGINT, print a plain message stating the interval was abandoned and nothing was logged, then exit non-zero.",
+   "boundary": [
+    "src/pomo/session.py"
+   ],
+   "depends": [
+    "T05"
+   ],
+   "exam_refs": [],
+   "context_estimate": 9000,
+   "risk": "low",
+   "backlog": true
+  },
+  {
+   "id": "B-05",
+   "goal": "Add a `--break` duration flag that runs a break interval, rendered differently and excluded from the completed-work log.",
+   "boundary": [
+    "src/pomo/cli.py",
+    "src/pomo/session.py"
+   ],
+   "depends": [
+    "T05"
+   ],
+   "exam_refs": [],
+   "context_estimate": 9000,
+   "risk": "low",
+   "backlog": true
+  },
+  {
+   "id": "B-06",
+   "goal": "Write factory/GUIDE.md covering pipx install, the SIGUSR1/SIGUSR2 pause controls, and the log format.",
+   "boundary": [
+    "factory/GUIDE.md"
+   ],
+   "depends": [
+    "T05"
+   ],
+   "exam_refs": [],
+   "context_estimate": 9000,
+   "risk": "low",
+   "backlog": true
+  }
+ ]
+}
