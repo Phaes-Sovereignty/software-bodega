@@ -99,6 +99,17 @@ Independence invariants, enforced by `assert_cross_family` in
 `scripts/lib/status.sh`: the judge must not share a family with the executor,
 and the plan reviewer must not share one with the plan's author.
 
+## Scripts
+
+| Script | What it does |
+|---|---|
+| `scripts/selftest.sh` | every mechanical Phase B check. Run before trusting a night. `--offline` skips live model calls. |
+| `scripts/bootstrap.sh` | drives SPEC → BLUEPRINT → EXAM → WORKORDER → PLANREVIEW, one fresh session per station, gates between. `--from <stage>` resumes. |
+| `scripts/nightshift.sh` | the unattended night loop. |
+| `scripts/inspect.sh` | the inspector: suite ×2, held-out suite, tamper audit, scope ledger, SHA-bound verdict. |
+| `scripts/runner.sh` `triage.sh` | the Small Loop. |
+| `scripts/tests/` | tests for the loop semantics and the held-out seal. |
+
 ## Deviations from FACTORY-BUILD.md
 
 Recorded per §5. Each is the smallest working alternative.
@@ -115,9 +126,55 @@ Recorded per §5. Each is the smallest working alternative.
    §1 says "configure exactly this", so §1 wins. `runner.sh` invokes the
    `executor` role rather than the `omp -p worker` named in the §2 tree comment.
    Switching to GLM/DeepSeek later is a `models.env` edit — no prompt changes.
-4. **Test-count parsing is best-effort.** `test_counts` reads TAP-ish and
-   pytest-ish output; an unrecognized format records `?/?` rather than guessing.
-   The exit code, not the count, is what gates anything.
+4. **Verification is no-regression, not all-green.** The spec's night loop reads
+   as "run the visible tests, repair on fail". Taken literally that parks every
+   task but the last, because a walking skeleton cannot make a full suite green.
+   A task must instead not *increase* the failing-check count from its own
+   baseline; the suite must reach zero by the end, which the inspector enforces
+   by running it twice. An unparseable receipt never counts as green.
+5. **`scripts/bootstrap.sh` and `scripts/inspect.sh` are additions** to the §2
+   tree. The spec names the stations but not a driver for them; without one, the
+   pipeline can only be run by hand. Phase C's foreman replaces `bootstrap.sh`.
+6. **A REJECT from the ◈ plan review is repairable.** The planner gets the review
+   back and revises, capped at `PLAN_REVISE_CAP` (2) rounds, then escalates to a
+   human — hard rule 4 applied to plans. Without this a single REJECT is a dead
+   end. The revision prompt forbids resolving objections by downgrading
+   qualifiers to `weak`.
+
+## Adapter facts learned the hard way
+
+These are load-bearing and easy to regress, so each has a check in `selftest.sh`:
+
+- **`claude -p` refuses tool use non-interactively** unless given a permission
+  mode. Without `--permission-mode acceptEdits` it replies "the write was
+  blocked" and produces no artifacts.
+- **`--allowedTools` is variadic**, so a prompt passed as a trailing argument is
+  swallowed as another tool name. Claude and codex therefore take the prompt on
+  **stdin**; grok rejects stdin and takes it as an **argument**. Declared per
+  role in `models.env` as `*_INPUT`, never sniffed from the model name.
+- **An arg-mode prompt must not start with `-`.** Every skill file opens with
+  YAML frontmatter (`---`), so this fires on essentially every worker prompt;
+  the CLI exits 2 before the model sees anything, and `--` does not help.
+  `run_role` prepends a newline.
+- **Adapter stderr must be surfaced.** While `run_role` swallowed it, the above
+  bug looked like "the worker returned no valid status block" — every task
+  parked, with no clue why.
+- **Planner stations legitimately run 25–40 minutes** and are I/O-bound, so low
+  CPU is *not* evidence of a hang; check artifact mtimes. `FACTORY_ROLE_TIMEOUT`
+  (default 3600s) is the ceiling for a station that has genuinely stopped.
+- **`grep -c` prints `0` and exits 1** when it matches nothing, so `|| echo 0`
+  appends a second zero. This corrupted both the failure count and a
+  pipe-delimited diary field.
+
+## Known gaps
+
+- **The night shift's held-out seal is prompt-level at Phase B**, as the spec
+  intends ("At B: directory never referenced in worker prompts"). The files are
+  on disk in the main checkout; only `runner.sh` worktrees seal them physically.
+  Phase C seals the night shift too, by sparse-checkout mount.
+- **CI has not been run against a live PR.** The workflow is validated locally
+  (YAML, job graph, `bash -n` on every run-block, four scope-check cases), but
+  proving it end-to-end needs a GitHub repo and the `HELDOUT_TESTS` secret.
 
 ## Not built, on purpose
 
