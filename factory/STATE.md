@@ -1,2 +1,2 @@
-STAGE: IDLE
-POINTER: no project loaded — run `bash scripts/nightshift.sh --help` or start at skills/factory-interview
+STAGE: NIGHT_SHIFT_COMPLETE
+POINTER: all tasks resolved; run the inspector

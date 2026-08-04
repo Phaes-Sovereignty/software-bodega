@@ -162,8 +162,18 @@ _scope 'Files changed:
 - src/a.py' "src/a.py" && bad "scope check accepted a missing ledger line" || ok "scope check rejects a missing ledger line"
 rm -f "$T1" "$T2"
 
-# --- 7. headless adapters --------------------------------------------------
-head_ "7. Headless adapter smoke tests"
+# --- 7. night-shift loop semantics (stubbed executor, no model calls) ------
+head_ "7. Night-shift loop semantics"
+if NS_OUT="$(bash scripts/tests/test-nightshift.sh 2>&1)"; then
+  while IFS= read -r l; do case "$l" in *"✓"*) PASS=$((PASS+1));; esac; done <<< "$NS_OUT"
+  printf '%s\n' "$NS_OUT" | grep "✓" | sed 's/^/  /'
+else
+  printf '%s\n' "$NS_OUT" | sed 's/^/  /'
+  bad "night-shift loop tests failed"
+fi
+
+# --- 8. headless adapters --------------------------------------------------
+head_ "8. Headless adapter smoke tests"
 if [ "$OFFLINE" = "1" ]; then
   printf '  \033[33m–\033[0m skipped (--offline)\n'
 else
