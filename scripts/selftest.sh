@@ -200,6 +200,20 @@ SUMMARY: adapter reachable
     fi
     rm -f "$O"
   done
+  # Regression: every real worker prompt starts with a skill file's YAML
+  # frontmatter, so the first characters are `---`. An arg-mode CLI parses that
+  # as a flag and exits 2 before the model ever sees it.
+  O="$(mktemp)"
+  if run_role executor "---
+name: frontmatter-probe
+---
+
+$PROBE" > "$O" 2>/dev/null && status_valid "$O" 2>/dev/null; then
+    ok "executor accepts a prompt starting with YAML frontmatter"
+  else
+    bad "executor rejects a prompt starting with '---' (worker prompts all do)"
+  fi
+  rm -f "$O"
 fi
 
 # --- summary ---------------------------------------------------------------

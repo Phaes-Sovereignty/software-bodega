@@ -182,7 +182,15 @@ run_role() {
   if [ "$mode" = "stdin" ]; then
     printf '%s' "$prompt" | "${argv[@]}" >"$out" 2>"$err" & pid=$!
   else
-    "${argv[@]}" "$prompt" >"$out" 2>"$err" & pid=$!
+    # A prompt passed as an argument must not START with a dash, or the CLI's
+    # own parser claims it as a flag. Every skill file opens with YAML
+    # frontmatter (`---`), so this fires on essentially every worker prompt;
+    # `--` does not help because the parser rejects it before that. A leading
+    # newline is inert to the model and fixes it.
+    local argprompt="$prompt"
+    case "$argprompt" in -*) argprompt="
+$argprompt" ;; esac
+    "${argv[@]}" "$argprompt" >"$out" 2>"$err" & pid=$!
   fi
   ( sleep "$limit"; kill -TERM "$pid" 2>/dev/null; sleep 5; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
   wait "$pid"; rc=$?
