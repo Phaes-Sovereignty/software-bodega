@@ -91,6 +91,34 @@ trap 'rm -rf "$TMP"' EXIT
 
 echo "nightshift loop semantics"
 
+# --- 0. verification arithmetic -------------------------------------------
+# fail_count must never mistake an unparseable receipt for a green suite, and
+# verify_ok encodes the no-regression rule the incremental build depends on.
+# shellcheck disable=SC1090
+source <(sed -n '/^fail_count()/,/^}/p;/^verify_ok()/,/^}/p' "$SRC/scripts/nightshift.sh")
+_fc() { printf '%s\n' "$2" > "$TMPFC"; local got; got="$(LAST_TEST_RC=${3:-1} fail_count "$TMPFC")"
+        [ "$got" = "$1" ] && ok "fail_count: $4" || bad "fail_count: $4 (want $1, got $got)"; }
+TMPFC="$(mktemp)"
+_fc 10 "FAILED (failures=10)" 1 "unittest failures"
+_fc 4  "FAILED (failures=3, errors=1)" 1 "unittest failures+errors"
+_fc 0  "Ran 3 tests
+
+OK" 0 "unittest OK"
+_fc 2  "ok 1
+not ok 2
+not ok 3" 1 "TAP failures"
+_fc 0  "ok 1
+ok 2" 0 "TAP all pass"
+_fc 127 "unrecognised" 127 "unparseable falls back to exit code, never 0"
+rm -f "$TMPFC"
+_vo() { verify_ok "$1" "$2" "$3" && local r=PASS || local r=FAIL
+        [ "$r" = "$4" ] && ok "verify_ok: $5" || bad "verify_ok: $5 (want $4, got $r)"; }
+_vo 10 10 1 PASS "no change is not a regression (docs-only task)"
+_vo 10 7  1 PASS "fewer failures is progress"
+_vo 10 11 1 FAIL "one more failure is a regression"
+_vo 10 0  0 PASS "fully green always passes"
+_vo 0  1  1 FAIL "breaking a green suite is a regression"
+
 # --- 1. happy path: dependency order, commits, dual-condition exit ---------
 D="$TMP/good"; make_repo "$D" good; tasks_abc "$D"
 ( cd "$D" && env -u FACTORY_ROOT bash scripts/nightshift.sh --max-iters 10 >/dev/null 2>&1 )

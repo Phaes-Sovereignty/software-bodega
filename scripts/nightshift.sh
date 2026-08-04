@@ -114,6 +114,36 @@ test_counts() { # crude pass/total from the receipt, best-effort
   printf '%s/%s' "$p" "$t"
 }
 
+# fail_count <receipt> : how many checks are currently failing.
+# 0 when the suite is green. Falls back to the exit code when the format is
+# unrecognised, so an unparseable receipt is never mistaken for success.
+fail_count() {
+  local out="$1" n
+  # python unittest: "FAILED (failures=3, errors=1)"
+  n=$(grep -oE '(failures|errors)=[0-9]+' "$out" 2>/dev/null | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')
+  if [ -n "$n" ] && [ "$n" != "0" ]; then printf '%s' "$n"; return; fi
+  grep -qE '^OK\b|^OK$' "$out" 2>/dev/null && { printf '0'; return; }
+  # TAP. No `|| echo 0` here: grep -c already prints 0 when it matches nothing,
+  # and it exits 1 doing so, which would append a second zero.
+  n=$(grep -cE '^not ok' "$out" 2>/dev/null); n="${n:-0}"
+  if [ "$n" != "0" ]; then printf '%s' "$n"; return; fi
+  grep -qE '^ok ' "$out" 2>/dev/null && { printf '0'; return; }
+  printf '%s' "${LAST_TEST_RC:-1}"
+}
+
+# The night shift builds a system incrementally: a walking skeleton cannot make
+# the whole suite green, and later tasks turn on the rest. Demanding an all-green
+# suite after every task would park every task but the last. The real rule is
+# NO REGRESSION — a task must not break a check that was already passing, and the
+# suite must reach zero failures by the end (the inspector enforces that).
+verify_ok() { # verify_ok <baseline_failures> <current_failures> <exit_rc>
+  local base="$1" cur="$2" rc="$3"
+  [ "$rc" = "0" ] && return 0                 # fully green: always fine
+  [ "$cur" = "127" ] && return 1              # no runner at all
+  [ "$cur" -le "$base" ] 2>/dev/null && return 0
+  return 1
+}
+
 # --- worker prompt ---------------------------------------------------------
 
 build_prompt() { # build_prompt <task_id> [repair_context_file]
@@ -163,16 +193,21 @@ resample() { # resample <task_id> -> 0 if a winner was merged
         > "$wt/.sample-out" 2>/dev/null
       ( eval "$VISIBLE_CMD" ) > "$wt/.sample-test" 2>&1
       echo $? > "$wt/.sample-rc"
+      LAST_TEST_RC=$(cat "$wt/.sample-rc")
+      fail_count "$wt/.sample-test" > "$wt/.sample-fails"
     ) &
     pids+=($!)
   done
   wait "${pids[@]}" 2>/dev/null
 
-  local wt rc
+  # Execution-selected: the winner is decided by test results, not by reading the
+  # samples. Same no-regression rule the main path uses.
+  local wt rc fails
   for wt in "${dirs[@]}"; do
     rc="$(cat "$wt/.sample-rc" 2>/dev/null || echo 1)"
-    if [ "$rc" = "0" ]; then
-      echo "[nightshift] $id: sample $(basename "$wt") won (tests exit 0)" >&2
+    fails="$(cat "$wt/.sample-fails" 2>/dev/null || echo 999)"
+    if verify_ok "${BASE_FAILS:-999}" "$fails" "$rc"; then
+      echo "[nightshift] $id: sample $(basename "$wt") won ($fails failing vs baseline ${BASE_FAILS:-?})" >&2
       # port the winner's working tree changes back into the main checkout
       ( cd "$wt" && git diff "$base" -- . ) > "$WORKDIR/winner.patch" 2>/dev/null
       if [ -s "$WORKDIR/winner.patch" ]; then
@@ -245,6 +280,12 @@ while [ "$iters" -lt "$MAX_ITERS" ]; do
   SHA_BEFORE="$(git rev-parse HEAD)"
   SF="$WORKDIR/$TASK.status"; TO="$WORKDIR/$TASK.test"
 
+  # Baseline BEFORE the worker touches anything: how many checks already fail.
+  # This is what "no regression" is measured against.
+  run_visible "$WORKDIR/$TASK.base"; LAST_TEST_RC=$?
+  BASE_FAILS="$(fail_count "$WORKDIR/$TASK.base")"
+  echo "[nightshift] $TASK: baseline $BASE_FAILS failing check(s)" >&2
+
   attempt "$TASK" "$SF"
   if ! status_valid "$SF" 2>/dev/null; then
     echo "[nightshift] $TASK: unparseable status block" >&2
@@ -263,24 +304,27 @@ while [ "$iters" -lt "$MAX_ITERS" ]; do
   fi
 
   # verify — the worker's word is never the evidence
-  run_visible "$TO"; TRC=$?
+  run_visible "$TO"; TRC=$?; LAST_TEST_RC=$TRC
+  CUR="$(fail_count "$TO")"
   repairs=0
-  while [ "$TRC" -ne 0 ] && [ "$repairs" -lt "$REPAIR_CAP" ]; do
+  while ! verify_ok "$BASE_FAILS" "$CUR" "$TRC" && [ "$repairs" -lt "$REPAIR_CAP" ]; do
     repairs=$((repairs + 1))
-    echo "[nightshift] $TASK: visible suite failed — repair $repairs/$REPAIR_CAP" >&2
-    log_append "nightshift" "repair" "$TASK round $repairs"
+    echo "[nightshift] $TASK: regression ($CUR failing vs $BASE_FAILS before) — repair $repairs/$REPAIR_CAP" >&2
+    log_append "nightshift" "repair" "$TASK round $repairs ($CUR vs baseline $BASE_FAILS)"
     attempt "$TASK" "$SF" "$TO"
-    run_visible "$TO"; TRC=$?
+    run_visible "$TO"; TRC=$?; LAST_TEST_RC=$TRC
+    CUR="$(fail_count "$TO")"
   done
 
-  if [ "$TRC" -ne 0 ]; then
+  if ! verify_ok "$BASE_FAILS" "$CUR" "$TRC"; then
     if resample "$TASK"; then
-      run_visible "$TO"; TRC=$?
+      run_visible "$TO"; TRC=$?; LAST_TEST_RC=$TRC
+      CUR="$(fail_count "$TO")"
     fi
   fi
 
-  if [ "$TRC" -ne 0 ]; then
-    progress_append "$TASK" "PARKED" "-" "$(test_counts "$TO")" "visible suite failed after $REPAIR_CAP repairs + resample N=$RESAMPLE_N"
+  if ! verify_ok "$BASE_FAILS" "$CUR" "$TRC"; then
+    progress_append "$TASK" "PARKED" "-" "$(test_counts "$TO")" "regression: $CUR failing vs $BASE_FAILS at task start, after $REPAIR_CAP repairs + resample N=$RESAMPLE_N"
     log_append "nightshift" "park" "$TASK verification failed"
     git checkout -q -- . 2>/dev/null
     continue
