@@ -166,15 +166,48 @@ These are load-bearing and easy to regress, so each has a check in `selftest.sh`
   appends a second zero. This corrupted both the failure count and a
   pipe-delimited diary field.
 
+## CI, proven end to end
+
+Run against a live private repo (`pomo-factory-ci-proof`, PR #1), both directions:
+
+| | build | visible | held-out | scope | review |
+|---|---|---|---|---|---|
+| PR body under-declared its diff | pass | pass | pass | **fail** | `NOT DONE` |
+| PR body declared it honestly | pass | pass | pass | pass | gates GREEN |
+
+The held-out job printed `held-out checks unpacked: 17` → `Ran 19 tests … OK`,
+fetched from the `HELDOUT_TESTS` secret in a repo where those files do not
+exist. The scope failure was real: the PR had quietly picked up a change to
+`.github/workflows/factory.yml` that its ledger never mentioned.
+
+**Setting it up on a new repo:**
+
+```bash
+tar czf - -C factory/tests/heldout . | base64 > heldout.b64
+gh secret set HELDOUT_TESTS --repo <owner>/<repo> < heldout.b64
+git rm -r --cached factory/tests/heldout    # the builder must not be able to read them
+echo 'factory/tests/heldout/' >> .gitignore
+```
+
+Pushing a workflow file needs a token with the `workflow` scope — `gh auth
+status` will show whether yours has it.
+
 ## Known gaps
 
 - **The night shift's held-out seal is prompt-level at Phase B**, as the spec
   intends ("At B: directory never referenced in worker prompts"). The files are
   on disk in the main checkout; only `runner.sh` worktrees seal them physically.
   Phase C seals the night shift too, by sparse-checkout mount.
-- **CI has not been run against a live PR.** The workflow is validated locally
-  (YAML, job graph, `bash -n` on every run-block, four scope-check cases), but
-  proving it end-to-end needs a GitHub repo and the `HELDOUT_TESTS` secret.
+- **The CI judge needs an API key.** `ANTHROPIC_API_KEY` is unset in the proof
+  repo, so the review job posts "mechanical gates GREEN … judge review skipped"
+  rather than a verdict. That degradation is deliberate — it never claims SHIP
+  without the judge — but subscription CLI auth does not transfer into CI, so a
+  real deployment needs a key in secrets for the judge comment to appear.
+- **A stale workflow copy is invisible locally.** GitHub rejects an invalid
+  workflow by failing a run at 0s with no annotations and no job list, which is
+  nearly undebuggable from the API. `selftest.sh` parses the workflow and shell-
+  lints every `run:` block precisely so this is caught before pushing — run it
+  in the project repo, not just the template.
 
 ## Not built, on purpose
 
