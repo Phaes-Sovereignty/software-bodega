@@ -1,0 +1,4 @@
+{"actors":["operator"],
+ "criteria":[{"id":"AC-1","check":"vibes","text":"it feels fast"},
+             {"id":"AC-1","text":"duplicate id and missing check"}],
+ "non_goals":[]}

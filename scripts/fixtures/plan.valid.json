@@ -1,0 +1,4 @@
+{"slices":[{"plan_id":"P-T02","claim":"a paused timer resumes from its remaining duration",
+  "grounds":{"file_manifest":["src/pomo/timer.py"],"acceptance_criteria":["AC-2"]},
+  "warrant":"remaining time is stored as a monotonic deadline delta at pause, so resume recomputes a fresh deadline and never re-reads the original duration",
+  "qualifier":"strong","rebuttal":["if the process sleeps across a suspend, a monotonic clock may not advance and resume would over-count"]}]}

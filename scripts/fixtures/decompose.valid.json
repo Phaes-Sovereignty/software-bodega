@@ -1,0 +1,2 @@
+{"tasks":[{"id":"T01","goal":"walking skeleton: pomo CLI entrypoint + --version + CI","boundary":["src/pomo/__init__.py","src/pomo/cli.py"],"depends":[],"exam_refs":["AC-1"],"context_estimate":14000,"risk":"low","backlog":false},
+          {"id":"T02","goal":"countdown timer core with pause/resume","boundary":["src/pomo/timer.py"],"depends":["T01"],"exam_refs":["AC-2"],"context_estimate":20000,"risk":"high","adr":"ADR-1","backlog":false}]}

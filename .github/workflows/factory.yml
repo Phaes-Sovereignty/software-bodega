@@ -1,0 +1,160 @@
+name: factory
+
+# The Small Loop's foreman. Nothing self-merges; this decides what a human is
+# allowed to merge. Missing evidence NEVER counts as green — every job that
+# cannot prove its result fails.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: Build
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          if [ -f pyproject.toml ]; then pip install -e . || true; fi
+          bash -n scripts/*.sh scripts/lib/*.sh
+
+  visible:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: Visible suite
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          test -f factory/tests/run-visible.sh || { echo "::error::no visible runner — cannot prove green"; exit 1; }
+          bash factory/tests/run-visible.sh | tee visible.log
+      - uses: actions/upload-artifact@v4
+        with: { name: visible-receipt, path: visible.log }
+
+  heldout:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      # The worker never sees these. They arrive here and only here.
+      # If >40KB, swap this step for a private-repo checkout with a PAT.
+      - name: Fetch held-out suite from secrets
+        env:
+          HELDOUT_TESTS: ${{ secrets.HELDOUT_TESTS }}
+        run: |
+          if [ -z "$HELDOUT_TESTS" ]; then
+            echo "::error::HELDOUT_TESTS secret is empty — held-out suite cannot run."
+            echo "::error::Missing evidence is not a pass. Failing."
+            exit 1
+          fi
+          rm -rf factory/tests/heldout
+          mkdir -p factory/tests/heldout
+          echo "$HELDOUT_TESTS" | base64 -d | tar xz -C factory/tests/heldout
+          echo "held-out checks unpacked: $(find factory/tests/heldout -type f | wc -l)"
+      - name: Held-out suite
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          test -f factory/tests/run-heldout.sh || { echo "::error::no held-out runner"; exit 1; }
+          bash factory/tests/run-heldout.sh | tee heldout.log
+      - uses: actions/upload-artifact@v4
+        with: { name: heldout-receipt, path: heldout.log }
+
+  scope:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Scope check — diff must match the declared file manifest
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git diff --name-only "$BASE".."$HEAD" | sort -u > changed.txt
+          # declared manifest = the "- path" lines under "Files changed:"
+          printf '%s\n' "$PR_BODY" | sed -n '/Files changed:/,/^$/p' \
+            | sed -n 's/^[[:space:]]*-[[:space:]]*//p' | sort -u > declared.txt
+          echo "--- changed ---"; cat changed.txt
+          echo "--- declared ---"; cat declared.txt
+          if [ ! -s declared.txt ]; then
+            echo "::error::PR body declares no file manifest — scope cannot be checked."
+            echo "::error::Missing evidence is not a pass. Failing."
+            exit 1
+          fi
+          if comm -23 changed.txt declared.txt | grep -q .; then
+            echo "::error::files changed outside the declared manifest:"
+            comm -23 changed.txt declared.txt
+            exit 1
+          fi
+          # the ledger line must be present and honest
+          printf '%s\n' "$PR_BODY" | grep -q "Other behavior changes:" \
+            || { echo "::error::PR body has no scope ledger line"; exit 1; }
+          echo "scope OK"
+      - name: Held-out seal check
+        run: |
+          # The PR must never carry held-out tests. If it does, the seal leaked.
+          if git diff --name-only "${{ github.event.pull_request.base.sha }}".."${{ github.event.pull_request.head.sha }}" \
+             | grep -q '^factory/tests/heldout/'; then
+            echo "::error::PR touches factory/tests/heldout/ — seal broken"
+            exit 1
+          fi
+          echo "seal OK"
+
+  review:
+    runs-on: ubuntu-latest
+    needs: [visible, heldout, scope]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with: { path: receipts }
+      - name: Judge review comment
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          V: ${{ needs.visible.result }}
+          H: ${{ needs.heldout.result }}
+          S: ${{ needs.scope.result }}
+        run: |
+          # Artifact-only context: contract + diff + receipts. Never a transcript.
+          DIFF="$(git diff "${{ github.event.pull_request.base.sha }}".."$SHA" | head -c 60000)"
+          RECEIPTS="$(cat receipts/*/*.log 2>/dev/null | head -c 20000)"
+          if [ "$V" != "success" ] || [ "$H" != "success" ] || [ "$S" != "success" ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" --body \
+              "Verdict on $SHA: NOT DONE
+
+CI evidence incomplete or failing — visible=$V heldout=$H scope=$S.
+Missing evidence never counts as green."
+            exit 0
+          fi
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" --body \
+              "Verdict on $SHA: mechanical gates GREEN (visible, held-out, scope).
+Judge review skipped: no ANTHROPIC_API_KEY configured."
+            exit 0
+          fi
+          npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || true
+          PROMPT="$(cat skills/inspector/SKILL.md
+                    printf '\n===== CONTRACT =====\n'; cat factory/CONTRACT.md 2>/dev/null
+                    printf '\n===== DIFF =====\n%s\n' "$DIFF"
+                    printf '\n===== TEST RECEIPTS =====\n%s\n' "$RECEIPTS"
+                    printf '\nReview this PR. First line must be exactly: Verdict on %s: SHIP|FIX FIRST|NOT DONE\n' "$SHA")"
+          claude -p "$PROMPT" --output-format json 2>/dev/null | jq -r '.result // "Verdict on '"$SHA"': NOT DONE (judge call failed)"' > verdict.txt
+          head -c 60000 verdict.txt | gh pr comment "${{ github.event.pull_request.number }}" --body-file -

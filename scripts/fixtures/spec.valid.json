@@ -1,0 +1,5 @@
+{"actors":["operator","cron"],
+ "criteria":[{"id":"AC-1","check":"cli","text":"`pomo start 25` prints a countdown and exits 0 when the timer completes"},
+             {"id":"AC-2","check":"test","text":"a paused timer resumes from the remaining duration, not from the start"},
+             {"id":"AC-3","check":"type","text":"a non-integer duration is rejected at parse time"}],
+ "non_goals":[{"id":"NG-1","text":"no GUI in v1"},{"id":"NG-2","text":"no cross-device sync"}]}
