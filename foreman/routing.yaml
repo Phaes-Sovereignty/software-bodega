@@ -15,6 +15,7 @@ families:
   xai:       [grok, grok-*]
   openai:    [codex, codex-*, gpt-*]
   moonshot:  [kimi, kimi-*, k3, k3-*]   # k3 does NOT match kimi-*
+  local:     [local/*, qwopus*]         # llama.cpp served on localhost
 
 roles:
   executor:
@@ -43,9 +44,9 @@ roles:
     cmd: ["omp", "-p", "--no-session", "--model", "grok-4.5"]
     input: arg
   fallback:
-    model: k3
-    family: moonshot          # a fourth family, reached only by escalation
-    cmd: ["omp", "-p", "--no-session", "--model", "k3"]
+    model: local/qwopus3.6-27b
+    family: local             # a fourth family, reached only by escalation
+    cmd: ["bash", "scripts/lib/local-model.sh"]
     input: arg
 
 # Independence invariants. Each is (judge_role, author_role): the two must never

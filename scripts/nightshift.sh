@@ -292,10 +292,23 @@ while [ "$iters" -lt "$MAX_ITERS" ]; do
   BASE_FAILS="$(fail_count "$WORKDIR/$TASK.base")"
   echo "[nightshift] $TASK: baseline $BASE_FAILS failing check(s)" >&2
 
+  # A missing status block is a TRANSPORT failure, not a verification failure:
+  # a dropped socket or a killed adapter says nothing about the work. Observed
+  # on omp, where the connection died after the worker had already written 141
+  # lines that took the suite from 10 failures to 2 — and the task was parked
+  # anyway. Retry the invocation before spending the task's only chance.
+  # This counter is separate from REPAIR_CAP, which is about failing tests.
+  adapter_tries=0
   attempt "$TASK" "$SF"
+  while ! status_valid "$SF" 2>/dev/null && [ "$adapter_tries" -lt "${ADAPTER_RETRIES:-2}" ]; do
+    adapter_tries=$((adapter_tries + 1))
+    echo "[nightshift] $TASK: no status block — adapter retry $adapter_tries/${ADAPTER_RETRIES:-2}" >&2
+    log_append "nightshift" "adapter_retry" "$TASK attempt $adapter_tries"
+    attempt "$TASK" "$SF"
+  done
   if ! status_valid "$SF" 2>/dev/null; then
-    echo "[nightshift] $TASK: unparseable status block" >&2
-    progress_append "$TASK" "PARKED" "-" "-" "worker returned no valid status block"
+    echo "[nightshift] $TASK: unparseable status block after ${ADAPTER_RETRIES:-2} retries" >&2
+    progress_append "$TASK" "PARKED" "-" "-" "worker returned no valid status block after ${ADAPTER_RETRIES:-2} adapter retries"
     log_append "nightshift" "park" "$TASK unparseable status"
     continue
   fi
