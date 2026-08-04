@@ -170,12 +170,26 @@ run_role() {
   [ -n "$cmd" ] || { echo "no command configured for role: $role" >&2; return 2; }
   mode="$(role_input_mode "$role")"
   err="$(mktemp)"
+  local out; out="$(mktemp)"
   local -a argv=()
   read -r -a argv <<< "$cmd"
+
+  # Watchdog. An adapter that hangs on a stalled stream defeats every repair cap
+  # in the design — observed during the Phase B dry run, where a station sat
+  # idle for 23 minutes after writing all its artifacts. macOS ships no
+  # timeout(1), so this is a plain background killer.
+  local limit="${FACTORY_ROLE_TIMEOUT:-1800}" pid wd
   if [ "$mode" = "stdin" ]; then
-    raw="$(printf '%s' "$prompt" | "${argv[@]}" 2>"$err")"; rc=$?
+    printf '%s' "$prompt" | "${argv[@]}" >"$out" 2>"$err" & pid=$!
   else
-    raw="$("${argv[@]}" "$prompt" 2>"$err")"; rc=$?
+    "${argv[@]}" "$prompt" >"$out" 2>"$err" & pid=$!
+  fi
+  ( sleep "$limit"; kill -TERM "$pid" 2>/dev/null; sleep 5; kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 & wd=$!
+  wait "$pid"; rc=$?
+  kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  raw="$(cat "$out")"; rm -f "$out"
+  if [ $rc -ge 124 ] || { [ $rc -ne 0 ] && [ ! -s "$err" ] && [ -z "$raw" ]; }; then
+    echo "role '$role' timed out or was killed after ${limit}s (rc=$rc)" >&2
   fi
   if [ $rc -ne 0 ]; then
     # Adapter failures are loud. A silent empty result becomes a bogus gate
