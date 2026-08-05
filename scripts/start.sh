@@ -12,6 +12,7 @@
 #   bash scripts/start.sh              interview, then run the pipeline
 #   bash scripts/start.sh --resume     pick up an in-flight project
 #   bash scripts/start.sh --print      print the prompt and exit (no session)
+#   bash scripts/start.sh --yolo       unattended test run: no human stops
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,10 +21,12 @@ cd "$ROOT" || exit 1
 
 MODEL="${BODEGA_CONDUCTOR_MODEL:-claude-opus-5}"
 MODE="new"
+YOLO=0
 for a in "$@"; do
   case "$a" in
     --resume) MODE="resume" ;;
     --print)  MODE="print" ;;
+    --yolo)   YOLO=1 ;;
   esac
 done
 
@@ -60,6 +63,27 @@ PROMPT="$(
   printf '\nYou have a shell. Run the station scripts yourself; long ones with\n'
   printf 'nohup ... & and poll. Never write spec.json, decompose.json,\n'
   printf 'plan.json, CONTRACT.md, any test, or any source file yourself.\n'
+  if [ "$YOLO" = "1" ]; then
+    printf '\n===== YOLO TEST MODE =====\n'
+    printf 'Nobody is watching. Run the WHOLE pipeline unattended, end to end.\n\n'
+    printf 'What YOLO changes -- the human STOPS only:\n'
+    printf '  - Do not wait for a signature on BRIEF.md. Write it, note in\n'
+    printf '    factory/log.md that it was auto-accepted under YOLO, continue.\n'
+    printf '  - Same for CONTRACT.md: record the auto-signature, continue.\n'
+    printf '  - Do not ask permission between stations. Just run the next one.\n'
+    printf '  - If the plan review escalates after its revisions, pick the most\n'
+    printf '    defensible option yourself, WRITE DOWN which and why, continue.\n\n'
+    printf 'What YOLO does NOT change -- these are the thing being tested:\n'
+    printf '  - Never edit CONTRACT.md after writing it. Never weaken, skip or\n'
+    printf '    delete a test. Never touch factory/tests/heldout/.\n'
+    printf '  - Never claim a gate passed that did not. A failing suite is a\n'
+    printf '    failing suite; report it.\n'
+    printf '  - STOP BEFORE MERGING. Run the inspector, report the verdict, and\n'
+    printf '    leave the merge to the human. A test that merges itself has\n'
+    printf '    removed the last thing standing between a bad night and main.\n\n'
+    printf 'Finish by printing: the verdict line, tasks done/parked, and every\n'
+    printf 'decision you made that a human would normally have made.\n'
+  fi
 )"
 
 # An argument-mode prompt must not START with a dash or omp's parser claims it
@@ -74,7 +98,15 @@ if [ "$MODE" = "print" ]; then printf '%s\n' "$PROMPT"; exit 0; fi
 printf '\033[1m  Software Bodega \033[0m\n'
 printf '  project : %s\n' "$ROOT"
 printf '  stage   : %s\n' "${STAGE:-INTERVIEW}"
-printf '  mode    : %s\n\n' "$MODE"
+printf '  mode    : %s%s\n\n' "$MODE" "$([ "$YOLO" = 1 ] && echo ' (YOLO)')"
 
 command -v omp >/dev/null 2>&1 || { echo "oh-my-pi (omp) is not on PATH." >&2; exit 1; }
+
+if [ "$YOLO" = "1" ]; then
+  # Headless stations inherit this through models.env, so nothing in the
+  # pipeline pauses on a tool gate either.
+  export BODEGA_APPROVAL=yolo
+  printf '\033[33m  YOLO: no human stops, no tool prompts. Verification unchanged.\033[0m\n\n'
+  exec omp --approval-mode yolo --model "$MODEL" "$PROMPT"
+fi
 exec omp --model "$MODEL" "$PROMPT"
