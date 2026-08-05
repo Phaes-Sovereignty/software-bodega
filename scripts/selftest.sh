@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# selftest.sh — Phase B definition-of-done checks. Run this before trusting the
+# selftest.sh — Software Bodega: definition-of-done checks. Run this before trusting the
 # factory with a night. Exits non-zero if any check fails.
 #
 # Usage: bash scripts/selftest.sh [--offline]   (--offline skips live model calls)

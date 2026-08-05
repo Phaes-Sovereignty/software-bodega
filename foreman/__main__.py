@@ -1,4 +1,4 @@
-"""foreman — the bootstrap pipeline's authority.
+"""foreman — Software Bodega's bootstrap authority.
 
     python -m foreman init      validate routing, probe every adapter
     python -m foreman status    where the line is and what is blocking it
@@ -61,7 +61,7 @@ def cmd_init(args) -> int:
     for d in ("factory/.planning/gate-results", "factory/.steps", "factory/tasks",
               "factory/tests/visible", "factory/tests/heldout"):
         (root / d).mkdir(parents=True, exist_ok=True)
-    print(f"foreman init — {root}")
+    print(f"Software Bodega — foreman init — {root}")
     try:
         router.validate()
         print("  routing.yaml: valid")

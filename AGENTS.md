@@ -1,6 +1,6 @@
 # AGENTS.md — read this first
 
-This is a **software factory**: a pipeline that turns an idea into verified code
+This is **Software Bodega**, a software factory: a pipeline that turns an idea into verified code
 with one human touch per stage.
 
 **Where state lives — on disk, never in chat history:**

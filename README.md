@@ -1,4 +1,4 @@
-# factory-app
+# Software Bodega
 
 A personal AI software factory. It turns an idea into verified, reviewed code
 with about four human touches per project and roughly ten minutes a day after
@@ -255,3 +255,21 @@ that is the only scheduled manual chore this system has.
 
 `CONTRACT.md` is immutable once signed. A contract that turned out wrong gets a
 new contract and a new signature, never a quiet edit.
+
+## Starting a project
+
+Double-click **`~/Quickie/Software Bodega.command`**. It asks for a folder, sets
+it up if it is not already a Bodega project (never destructively), and opens
+iTerm there running the interview.
+
+Or from a shell:
+
+```bash
+"~/Quickie/Software Bodega.command"                  # pick a folder
+"~/Quickie/Software Bodega.command" ~/my-project     # skip the picker
+"~/Quickie/Software Bodega.command" ~/my-project --no-launch   # set up only
+```
+
+Inside a project, `bash scripts/interview.sh` starts (or resumes) the interview
+directly. The interview is the only interactive station; everything after it
+runs unattended.
