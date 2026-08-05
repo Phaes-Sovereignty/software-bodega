@@ -1,0 +1,25 @@
+6 |     func testFails() { XCTAssertEqual(add(2, 2), 5) }
+  |                                       |- error: use of 'add' refers to instance method rather than global function 'add' in module 'Demo'
+  |                                       `- note: use 'Demo.' to reference the global function in module 'Demo'
+7 |     func testFailsToo() { XCTAssertEqual(add(0, 0), 1) }
+8 | }
+
+/private/tmp/claude-501/-Users-bcw-project-Vibe-Factory/39b23cf4-a5ea-4b68-a648-b152d27fa8f7/scratchpad/swifttest/Sources/Demo/Demo.swift:1:13: note: 'add' declared here
+1 | public func add(_ a: Int, _ b: Int) -> Int { a + b }
+  |             `- note: 'add' declared here
+2 | 
+
+/private/tmp/claude-501/-Users-bcw-project-Vibe-Factory/39b23cf4-a5ea-4b68-a648-b152d27fa8f7/scratchpad/swifttest/Tests/DemoTests/DemoTests.swift:7:42: error: use of 'add' refers to instance method rather than global function 'add' in module 'Demo'
+5 |     func testAlsoPasses() { XCTAssertEqual(add(1, 1), 2) }
+6 |     func testFails() { XCTAssertEqual(add(2, 2), 5) }
+7 |     func testFailsToo() { XCTAssertEqual(add(0, 0), 1) }
+  |                                          |- error: use of 'add' refers to instance method rather than global function 'add' in module 'Demo'
+  |                                          `- note: use 'Demo.' to reference the global function in module 'Demo'
+8 | }
+9 | 
+
+/private/tmp/claude-501/-Users-bcw-project-Vibe-Factory/39b23cf4-a5ea-4b68-a648-b152d27fa8f7/scratchpad/swifttest/Sources/Demo/Demo.swift:1:13: note: 'add' declared here
+1 | public func add(_ a: Int, _ b: Int) -> Int { a + b }
+  |             `- note: 'add' declared here
+2 | 
+error: fatalError

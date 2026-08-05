@@ -17,13 +17,16 @@ You have no memory of other tasks and you do not need any.
 
 ## Your loop
 
-1. **Read the task file first.** Note the boundary. It is a hard limit.
-2. **Run the visible tests before writing code.** They should fail. If they
-   already pass, the task is done or the tests are wrong — emit
+1. **Read the task file first.** Note the boundary — it is a hard limit — and
+   note its `Verify:` line. That exact command is what you are judged on. If it
+   is `-`, use the whole visible suite from `factory/HANDOFF.md`.
+2. **Run the `Verify:` command before writing code.** It should fail. If it
+   already passes, the task is done or the tests are wrong — emit
    `STATUS: NEEDS_CONTEXT` and say which.
 3. **Write the test-facing behavior, then the code.** Smallest thing that turns
    the failing check green.
-4. **Run the visible suite.** Iterate until it exits 0.
+4. **Run the `Verify:` command again.** Iterate until it exits 0. In a compiled
+   language a build error counts as a failure, not as "no tests ran".
 5. **Commit only your boundary files** (see below).
 6. **Emit the status block.**
 

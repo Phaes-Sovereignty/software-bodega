@@ -1,0 +1,3 @@
+Test Suite 'All tests' failed at 2026-08-04 21:08:08.875.
+	 Executed 12 tests, with 3 failures (0 unexpected) in 1.2 (1.3) seconds
+** TEST FAILED **

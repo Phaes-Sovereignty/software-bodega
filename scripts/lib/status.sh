@@ -19,6 +19,13 @@ export FACTORY_ROOT
 # shellcheck disable=SC1091
 [ -f "$FACTORY_ROOT/models.env" ] && . "$FACTORY_ROOT/models.env"
 
+# Optional per-project toolchain profile: how THIS project is built and
+# verified (VISIBLE_CMD, HELDOUT_CMD, EXTRA_GATE_CMD, BUILD_CMD). Separate from
+# models.env, which says who does the work. A project with no profile falls
+# back to factory/tests/run-visible.sh, which is what the exam board writes.
+# shellcheck disable=SC1091
+[ -f "$FACTORY_ROOT/factory/toolchain.env" ] && . "$FACTORY_ROOT/factory/toolchain.env"
+
 STATUS_VALID_STATES="DONE BLOCKED NEEDS_CONTEXT"
 
 # --- parsing --------------------------------------------------------------

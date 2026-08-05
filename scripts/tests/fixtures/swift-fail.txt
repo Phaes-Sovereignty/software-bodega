@@ -1,0 +1,8 @@
+Test Case '-[DemoTests.DemoTests testPasses]' passed (0.000 seconds).
+Test Suite 'DemoTests' failed at 2026-08-04 21:08:08.875.
+	 Executed 4 tests, with 2 failures (0 unexpected) in 0.235 (0.235) seconds
+Test Suite 'DemoPackageTests.xctest' failed at 2026-08-04 21:08:08.875.
+	 Executed 4 tests, with 2 failures (0 unexpected) in 0.235 (0.235) seconds
+Test Suite 'All tests' failed at 2026-08-04 21:08:08.875.
+	 Executed 4 tests, with 2 failures (0 unexpected) in 0.235 (0.236) seconds
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

@@ -277,6 +277,77 @@ Three independent nets sit behind every change: visible exams the builder must
 pass, held-out exams it cannot see, and a cross-family judge plus your merge
 button. Nothing self-merges.
 
+## Toolchains — Swift, and anything that isn't Python
+
+The factory does not assume how your project builds. Each project declares that
+once, in `factory/toolchain.env`, which every station loads:
+
+```bash
+VISIBLE_CMD='swift test --filter VisibleTests'
+HELDOUT_CMD='swift test --manifest-cache none --filter HeldoutTests'
+BUILD_CMD='swift build'
+EXTRA_GATE_CMD='bash scripts/check-target-graph.sh'   # optional
+FACTORY_ROLE_TIMEOUT=5400
+```
+
+Copy `docs/toolchains/swift.env` as a starting point. The work order writes this
+file from the interview's answers; nothing here belongs in `models.env`.
+
+**Per-task verification.** Each task file carries a `Verify:` line — the
+narrowest command that can fail for that task, usually a `--filter` slice of the
+visible suite. The night shift takes a baseline with it before the worker runs,
+re-runs the same command after, and applies the no-regression rule to the pair.
+`Verify: -` falls back to `VISIBLE_CMD`. Gating a task on the whole suite makes
+unrelated red elsewhere in the repo drown the signal the task is judged on, and
+on a compiled project it pays the full build on every repair round.
+
+**`EXTRA_GATE_CMD`** runs alongside every verification and counts as one failing
+check. So breaking a project invariant fails the task even with a green suite,
+while an invariant that was already red is inherited rather than blamed on
+whoever touched the repo next. Leave it empty if you have no such check.
+
+### Three things about Swift that cost real debugging
+
+These came out of running `swift test` and reading what it actually prints, not
+from what the format is supposed to look like:
+
+1. **`Executed N tests, with M failures` prints three times** — per suite, per
+   bundle, and as an "All tests" rollup. Summing them triples the count. Bodega
+   reads the last occurrence.
+2. **Swift 6 emits a swift-testing line even for XCTest-only packages**
+   (`✔ Test run with 0 tests in 0 suites passed`). Read that as the result and a
+   run with failing XCTest cases reports success. The two frameworks are counted
+   separately and added.
+3. **A compile error produces no count line at all.** That has to fall through
+   to the exit code. Before this, `fail_count` returned `1` for a green run, a
+   two-failure run, and a build failure alike — so the no-regression check
+   compared 1 against 1 and passed a task that had broken twenty tests.
+
+### The seal has to survive a compiled build
+
+In Python, sealing the held-out suite is free — delete the directory. In Swift,
+`Package.swift` names its test targets, so a sealed `HeldoutTests` directory
+breaks the build for the builder, and then *every* task parks. The exam board
+declares that target conditionally:
+
+```swift
+// #filePath, not "Tests/HeldoutTests": the manifest is not evaluated with the
+// package root as its working directory, so a relative path checks the wrong
+// place, returns true, and the sealed build fails.
+let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+if FileManager.default.fileExists(
+       atPath: root.appendingPathComponent("Tests/HeldoutTests").path) {
+    targets.append(.testTarget(name: "HeldoutTests", dependencies: ["App"]))
+}
+```
+
+Then run the held-out suite with `--manifest-cache none`, in a fresh checkout.
+SwiftPM caches the evaluated manifest by its *contents*, and `.build` caches the
+target list — either one can serve a manifest evaluated in the opposite seal
+state and report `Executed 0 tests` as a pass. Bodega's held-out runs already
+happen in clean sparse-checkout worktrees and CI checkouts, which avoids the
+`.build` half; the flag covers the other.
+
 ## Configuring models
 
 `models.env` maps **roles** to CLIs. Prompt files never name a model, so

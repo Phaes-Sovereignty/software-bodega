@@ -58,14 +58,40 @@ answers the questions it would otherwise waste a turn asking:
 ## Orientation Q&A
 **Where does the code live?** ...
 **How do I run the visible tests?** `<exact command>`
+**How do I build?** `<exact command>`
 **What am I allowed to touch?** Only the boundary listed in factory/tasks/<id>.md
-**What does done look like?** Visible suite exits 0; status block emitted.
+**What does done look like?** The task's `Verify:` command is no worse than the
+baseline taken before you started; status block emitted.
 **What if I get stuck?** Emit STATUS: BLOCKED with the specific error. Do not
 guess at scope. Do not touch factory/tests/heldout/ (it is not there).
 
 ## Slices
 <one section per slice, claim + file manifest + how to verify>
 ```
+
+## The verification gate — declared, not assumed
+
+The night shift does not guess how this project is built. It reads
+`factory/toolchain.env`, which you write here from the answers above:
+
+```bash
+VISIBLE_CMD='swift test --filter VisibleTests'          # the whole visible suite
+HELDOUT_CMD='swift test --manifest-cache none --filter HeldoutTests'
+BUILD_CMD='swift build'
+EXTRA_GATE_CMD='bash scripts/check-target-graph.sh'     # optional, may be empty
+FACTORY_ROLE_TIMEOUT=5400                                # compiled builds are slow
+```
+
+`VISIBLE_CMD` is the fallback for tasks whose `Verify:` is `-`; per-task
+commands come from `factory/tasks/<id>.md` and are usually a `--filter` slice of
+it. `EXTRA_GATE_CMD` runs after every verification and fails it on non-zero —
+use it for project invariants that are not tests (target-graph shape, no
+circular imports, generated files still in sync). Leave it empty when the
+project has no such check; do not invent one to look thorough.
+
+Copy `docs/toolchains/swift.env` as a starting point for Swift projects. Every
+command must run from the repo root. Verify each one actually runs before you
+write it down — a toolchain.env with a typo parks every task in the build.
 
 ## ◈ Plan review — cross-family, mandatory
 

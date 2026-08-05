@@ -98,18 +98,50 @@ all_resolved() {
 
 # --- verification ----------------------------------------------------------
 
-run_visible() { # -> exit code; output to $1
-  local out="$1"
-  if [ ! -f factory/tests/run-visible.sh ]; then
-    echo "no factory/tests/run-visible.sh — cannot verify" > "$out"; return 127
+# run_visible <receipt> [cmd] : run the verification command, output to <receipt>.
+#
+# `cmd` overrides the project-wide VISIBLE_CMD so a task can be gated on the
+# slice of the suite it is responsible for — e.g. `swift test --filter T03`
+# from the work order — instead of the whole thing. The SAME command must be
+# used for a task's baseline and its post-check, or the no-regression
+# comparison is measuring two different sets.
+#
+# EXTRA_GATE_CMD (from factory/toolchain.env) is a project-level invariant that
+# runs alongside every verification — a target-graph check, a lint, a schema
+# check. It fails the task even when the tests are green.
+run_visible() {
+  local out="$1" cmd="${2:-$VISIBLE_CMD}" rc
+  if [ -z "$cmd" ] || { [ "$cmd" = "bash factory/tests/run-visible.sh" ] && [ ! -f factory/tests/run-visible.sh ]; }; then
+    echo "no verification command — cannot verify" > "$out"; return 127
   fi
-  ( eval "$VISIBLE_CMD" ) > "$out" 2>&1
+  ( eval "$cmd" ) > "$out" 2>&1; rc=$?
+  if [ -n "${EXTRA_GATE_CMD:-}" ]; then
+    printf '\n--- extra gate: %s ---\n' "$EXTRA_GATE_CMD" >> "$out"
+    if ! ( eval "$EXTRA_GATE_CMD" ) >> "$out" 2>&1; then
+      printf '** EXTRA GATE FAILED **\n' >> "$out"
+      [ "$rc" = "0" ] && rc=1
+    fi
+  fi
+  return $rc
+}
+
+# task_verify_cmd <task_id> : the task's own verification command, if the work
+# order gave it one (a `Verify:` line in factory/tasks/<id>.md).
+task_verify_cmd() {
+  local v; v="$(task_field "$1" "Verify")"
+  case "$v" in ""|"-") printf '%s' "$VISIBLE_CMD" ;; *) printf '%s' "$v" ;; esac
 }
 
 test_counts() { # crude pass/total from the receipt, best-effort
   # No `|| echo 0`: grep -c prints 0 and exits 1 when it matches nothing, which
   # would append a second zero and corrupt the progress.md line.
   local out="$1" p t ran
+  # Swift/XCTest: "Executed N tests, with M failures" — last occurrence is the
+  # "All tests" rollup, same reason as swift_fail_count.
+  ran=$(grep -oE 'Executed [0-9]+ tests?, with' "$out" 2>/dev/null | tail -1 | grep -oE '[0-9]+')
+  if [ -n "$ran" ]; then
+    printf '%s/%s' "$(( ran - $(fail_count "$out") ))" "$ran"; return
+  fi
   ran=$(grep -oE '^Ran ([0-9]+) test' "$out" 2>/dev/null | grep -oE '[0-9]+' | head -1)
   if [ -n "$ran" ]; then
     printf '%s/%s' "$(( ran - $(fail_count "$out") ))" "$ran"; return
@@ -120,20 +152,68 @@ test_counts() { # crude pass/total from the receipt, best-effort
   printf '%s/%s' "$p" "$t"
 }
 
+# swift_fail_count <receipt> : failing checks from `swift test` / `xcodebuild
+# test`, or non-zero return if this receipt is not Swift at all.
+#
+# Three properties of real Swift output that a naive parser gets wrong:
+#
+#  1. XCTest prints "Executed N tests, with M failures" once per suite AND
+#     again for the "All tests" rollup — summing them multiplies the count.
+#     Take the LAST occurrence, which is the rollup.
+#  2. Swift 6 runs swift-testing alongside XCTest and prints its own line even
+#     for an XCTest-only package ("Test run with 0 tests ... passed"). Reading
+#     that line as the whole result reports success while XCTest is failing.
+#     The two frameworks are counted separately and ADDED.
+#  3. A compile failure produces NO count line at all. That must fall through
+#     to the exit code, never to zero.
+swift_fail_count() {
+  local out="$1" total=0 found=0 n
+  # 1. XCTest rollup — last occurrence only.
+  n=$(grep -oE 'Executed [0-9]+ tests?, with [0-9]+ failure' "$out" 2>/dev/null \
+      | tail -1 | sed -E 's/.*with ([0-9]+) failure.*/\1/')
+  if [ -n "$n" ]; then total=$((total + n)); found=1; fi
+  # 2. swift-testing, which reports "issues" rather than failures.
+  if grep -qE 'Test run with .*failed.*with [0-9]+ issue' "$out" 2>/dev/null; then
+    n=$(grep -oE 'with [0-9]+ issue' "$out" 2>/dev/null | tail -1 | grep -oE '[0-9]+')
+    total=$((total + ${n:-1})); found=1
+  elif grep -qE 'Test run with .*passed' "$out" 2>/dev/null; then
+    found=1
+  fi
+  # 3. xcodebuild banner: a backstop when the Executed line is absent or 0 but
+  #    the run still failed (a crashed bundle, a failed build phase).
+  if grep -q '\*\* TEST FAILED \*\*' "$out" 2>/dev/null; then
+    [ "$total" = "0" ] && total=1
+    found=1
+  fi
+  [ "$found" = "1" ] || return 1
+  printf '%s' "$total"
+}
+
 # fail_count <receipt> : how many checks are currently failing.
 # 0 when the suite is green. Falls back to the exit code when the format is
 # unrecognised, so an unparseable receipt is never mistaken for success.
 fail_count() {
-  local out="$1" n
+  local out="$1" n g=0
+  # The extra gate is a failing CHECK, counted alongside the tests. It has to
+  # enter the arithmetic or it is invisible: a task that breaks the invariant
+  # while keeping the suite green would score 0 against a baseline of 0 and
+  # read as "no regression". Counting it means breaking the invariant IS a
+  # regression, while an invariant already broken before the task started
+  # stays that task's inherited problem — the same rule as every other check.
+  if grep -q '^\*\* EXTRA GATE FAILED \*\*' "$out" 2>/dev/null; then g=1; fi
+  # Swift first: its receipts contain no unittest/TAP markers, so there is no
+  # ambiguity, and a Swift build failure must reach the exit-code fallback
+  # rather than being read as a green suite.
+  if n=$(swift_fail_count "$out"); then printf '%s' "$((n + g))"; return; fi
   # python unittest: "FAILED (failures=3, errors=1)"
   n=$(grep -oE '(failures|errors)=[0-9]+' "$out" 2>/dev/null | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')
-  if [ -n "$n" ] && [ "$n" != "0" ]; then printf '%s' "$n"; return; fi
-  grep -qE '^OK\b|^OK$' "$out" 2>/dev/null && { printf '0'; return; }
+  if [ -n "$n" ] && [ "$n" != "0" ]; then printf '%s' "$((n + g))"; return; fi
+  grep -qE '^OK\b|^OK$' "$out" 2>/dev/null && { printf '%s' "$g"; return; }
   # TAP. No `|| echo 0` here: grep -c already prints 0 when it matches nothing,
   # and it exits 1 doing so, which would append a second zero.
   n=$(grep -cE '^not ok' "$out" 2>/dev/null); n="${n:-0}"
-  if [ "$n" != "0" ]; then printf '%s' "$n"; return; fi
-  grep -qE '^ok ' "$out" 2>/dev/null && { printf '0'; return; }
+  if [ "$n" != "0" ]; then printf '%s' "$((n + g))"; return; fi
+  grep -qE '^ok ' "$out" 2>/dev/null && { printf '%s' "$g"; return; }
   printf '%s' "${LAST_TEST_RC:-1}"
 }
 
@@ -161,7 +241,14 @@ build_prompt() { # build_prompt <task_id> [repair_context_file]
   sed -n '1,120p' factory/HANDOFF.md 2>/dev/null
   printf '\n\n===== CONTRACT =====\n'
   sed -n '1,120p' factory/CONTRACT.md 2>/dev/null
-  printf '\n\n===== HOW TO VERIFY =====\nRun: %s\n' "$VISIBLE_CMD"
+  # The task's own command, not the project-wide suite: this is exactly what the
+  # gate re-runs afterwards. Telling the worker to run something broader means
+  # it optimises for a signal it is not judged on — and on a compiled project it
+  # pays the full build every iteration for no reason.
+  printf '\n\n===== HOW TO VERIFY =====\nRun: %s\n' "$(task_verify_cmd "$id")"
+  [ -n "${BUILD_CMD:-}" ] && printf 'Build with: %s\n' "$BUILD_CMD"
+  [ -n "${EXTRA_GATE_CMD:-}" ] && \
+    printf 'This also runs and must pass: %s\n' "$EXTRA_GATE_CMD"
   if [ -n "$repair" ] && [ -f "$repair" ]; then
     printf '\n\n===== PREVIOUS ATTEMPT FAILED — REPAIR =====\n'
     printf 'The visible suite did not pass. Fix the cause, not the test.\n\n'
@@ -185,22 +272,32 @@ attempt() { # attempt <task_id> <outfile> [repair_ctx] -> executor exit
 # --- resample: N parallel worktrees, execution-selected --------------------
 
 resample() { # resample <task_id> -> 0 if a winner was merged
-  local id="$1" i pids=() dirs=() base
+  local id="$1" i pids=() dirs=() base RS_CMD
+  RS_CMD="$(task_verify_cmd "$id")"
   base="$(git rev-parse HEAD)"
   echo "[nightshift] $id: resampling N=$RESAMPLE_N (execution-selected)" >&2
   log_append "nightshift" "resample_start" "$id N=$RESAMPLE_N"
+  # Sample receipts live OUTSIDE the worktree. Written inside it they become
+  # untracked files in the sample's own tree, which makes every sample look
+  # dirty to the did-it-do-anything check below and puts the receipts
+  # themselves into the winner's patch.
   for i in $(seq 1 "$RESAMPLE_N"); do
-    local wt="$WORKDIR/rs-$id-$i"
+    local wt="$WORKDIR/rs-$id-$i" sp="$WORKDIR/sample-$id-$i"
     git worktree add -q --detach "$wt" "$base" 2>/dev/null || continue
     dirs+=("$wt")
     (
       cd "$wt" || exit 1
       FACTORY_ROOT="$wt" run_role executor "$(build_prompt "$id")" \
-        > "$wt/.sample-out" 2>/dev/null
-      ( eval "$VISIBLE_CMD" ) > "$wt/.sample-test" 2>&1
-      echo $? > "$wt/.sample-rc"
-      LAST_TEST_RC=$(cat "$wt/.sample-rc")
-      fail_count "$wt/.sample-test" > "$wt/.sample-fails"
+        > "$sp.out" 2>/dev/null
+      # run_visible, not a bare eval: the sample has to face the SAME gate as
+      # the attempt it is replacing, extra gate included. Judging samples by a
+      # weaker standard is how a task that breaks a project invariant fails the
+      # main path and then wins on resample. cwd is the worktree, so the gate
+      # runs against this sample's tree.
+      run_visible "$sp.test" "$RS_CMD"
+      echo $? > "$sp.rc"
+      LAST_TEST_RC=$(cat "$sp.rc")
+      fail_count "$sp.test" > "$sp.fails"
     ) &
     pids+=($!)
   done
@@ -208,18 +305,32 @@ resample() { # resample <task_id> -> 0 if a winner was merged
 
   # Execution-selected: the winner is decided by test results, not by reading the
   # samples. Same no-regression rule the main path uses.
-  local wt rc fails
+  local wt rc fails sp
   for wt in "${dirs[@]}"; do
-    rc="$(cat "$wt/.sample-rc" 2>/dev/null || echo 1)"
-    fails="$(cat "$wt/.sample-fails" 2>/dev/null || echo 999)"
+    sp="$WORKDIR/sample-$id-${wt##*-}"
+    rc="$(cat "$sp.rc" 2>/dev/null || echo 1)"
+    fails="$(cat "$sp.fails" 2>/dev/null || echo 999)"
+    # A sample that changed nothing is not a fix, it is an absence of work —
+    # and doing nothing trivially satisfies no-regression, so without this it
+    # WINS. The main path already refuses to credit an empty diff (the circuit
+    # breaker); the resample path has to hold the same line.
+    if [ -z "$( cd "$wt" && git status --porcelain 2>/dev/null | head -1 )" ]; then
+      echo "[nightshift] $id: sample $(basename "$wt") changed nothing — not a winner" >&2
+      log_append "nightshift" "resample_empty" "$id $(basename "$wt") produced no diff"
+      continue
+    fi
     if verify_ok "${BASE_FAILS:-999}" "$fails" "$rc"; then
       echo "[nightshift] $id: sample $(basename "$wt") won ($fails failing vs baseline ${BASE_FAILS:-?})" >&2
-      # port the winner's working tree changes back into the main checkout
-      ( cd "$wt" && git diff "$base" -- . ) > "$WORKDIR/winner.patch" 2>/dev/null
+      # Port the winner in. `git add -A` first: a file the sample CREATED is
+      # untracked and invisible to plain `git diff`, which used to leave the
+      # patch empty and fall through to a tar copy of the whole worktree — and
+      # that copied the sample's stale factory/ bookkeeping over the live one,
+      # erasing the night's log and progress diary. Never restore factory/ from
+      # a sample: the loop owns it, the task does not.
+      ( cd "$wt" && git add -A >/dev/null 2>&1
+        git diff --cached "$base" -- . ':(exclude)factory' ) > "$WORKDIR/winner.patch" 2>/dev/null
       if [ -s "$WORKDIR/winner.patch" ]; then
         git apply --whitespace=nowarn "$WORKDIR/winner.patch" 2>/dev/null || true
-      else
-        ( cd "$wt" && tar cf - --exclude=.git --exclude='.sample-*' . ) | tar xf - -C "$FACTORY_ROOT"
       fi
       log_append "nightshift" "resample_win" "$id $(basename "$wt")"
       for wt in "${dirs[@]}"; do git worktree remove --force "$wt" 2>/dev/null; done
@@ -286,9 +397,16 @@ while [ "$iters" -lt "$MAX_ITERS" ]; do
   SHA_BEFORE="$(git rev-parse HEAD)"
   SF="$WORKDIR/$TASK.status"; TO="$WORKDIR/$TASK.test"
 
+  # The task's own verification command (work-order `Verify:` line, else the
+  # project default). Computed ONCE and reused for the baseline, every repair
+  # round and the resample — comparing counts from two different commands
+  # would make "no regression" meaningless.
+  TASK_CMD="$(task_verify_cmd "$TASK")"
+  [ "$TASK_CMD" = "$VISIBLE_CMD" ] || echo "[nightshift] $TASK: verify = $TASK_CMD" >&2
+
   # Baseline BEFORE the worker touches anything: how many checks already fail.
   # This is what "no regression" is measured against.
-  run_visible "$WORKDIR/$TASK.base"; LAST_TEST_RC=$?
+  run_visible "$WORKDIR/$TASK.base" "$TASK_CMD"; LAST_TEST_RC=$?
   BASE_FAILS="$(fail_count "$WORKDIR/$TASK.base")"
   echo "[nightshift] $TASK: baseline $BASE_FAILS failing check(s)" >&2
 
@@ -323,7 +441,7 @@ while [ "$iters" -lt "$MAX_ITERS" ]; do
   fi
 
   # verify — the worker's word is never the evidence
-  run_visible "$TO"; TRC=$?; LAST_TEST_RC=$TRC
+  run_visible "$TO" "$TASK_CMD"; TRC=$?; LAST_TEST_RC=$TRC
   CUR="$(fail_count "$TO")"
   repairs=0
   while ! verify_ok "$BASE_FAILS" "$CUR" "$TRC" && [ "$repairs" -lt "$REPAIR_CAP" ]; do
@@ -331,13 +449,13 @@ while [ "$iters" -lt "$MAX_ITERS" ]; do
     echo "[nightshift] $TASK: regression ($CUR failing vs $BASE_FAILS before) — repair $repairs/$REPAIR_CAP" >&2
     log_append "nightshift" "repair" "$TASK round $repairs ($CUR vs baseline $BASE_FAILS)"
     attempt "$TASK" "$SF" "$TO"
-    run_visible "$TO"; TRC=$?; LAST_TEST_RC=$TRC
+    run_visible "$TO" "$TASK_CMD"; TRC=$?; LAST_TEST_RC=$TRC
     CUR="$(fail_count "$TO")"
   done
 
   if ! verify_ok "$BASE_FAILS" "$CUR" "$TRC"; then
     if resample "$TASK"; then
-      run_visible "$TO"; TRC=$?; LAST_TEST_RC=$TRC
+      run_visible "$TO" "$TASK_CMD"; TRC=$?; LAST_TEST_RC=$TRC
       CUR="$(fail_count "$TO")"
     fi
   fi
@@ -345,7 +463,12 @@ while [ "$iters" -lt "$MAX_ITERS" ]; do
   if ! verify_ok "$BASE_FAILS" "$CUR" "$TRC"; then
     progress_append "$TASK" "PARKED" "-" "$(test_counts "$TO")" "regression: $CUR failing vs $BASE_FAILS at task start, after $REPAIR_CAP repairs + resample N=$RESAMPLE_N"
     log_append "nightshift" "park" "$TASK verification failed"
-    git checkout -q -- . 2>/dev/null
+    # Throw away the failed task's edits — but NOT factory/. progress.md and
+    # log.md are tracked, so a bare `git checkout -- .` reverts the park record
+    # written on the two lines above. The task then reads as unresolved, gets
+    # retried against a baseline its own damage has already degraded, and is
+    # marked DONE for leaving things exactly as broken as it found them.
+    git checkout -q -- . ':(exclude)factory' 2>/dev/null
     continue
   fi
 

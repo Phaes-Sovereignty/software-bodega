@@ -35,6 +35,70 @@ Never write a held-out test that depends on an internal function name or a file
 path. It must test observable behavior, or it will break on any honest refactor
 and teach the factory to distrust its own exams.
 
+## The partition must survive the build system
+
+In a scripting language the seal is free: delete the directory and nothing
+notices. In a **compiled** language the build manifest names its test targets,
+so removing the held-out directory breaks the build for the builder — who then
+cannot run *any* test, and every task parks. Whatever the toolchain, the rule
+is: **the visible suite must build and run in a checkout where the held-out
+directory does not exist.** Prove it before you leave the station.
+
+### Swift — XCTest, two test targets
+
+Write XCTest (`import XCTest`, `XCTestCase` subclasses, `XCTAssert*`), not
+swift-testing. Bodega's parser counts both, but XCTest is what
+`swift test --filter` slices cleanly per task.
+
+Split into two test targets, mirroring the partition:
+
+```
+Tests/VisibleTests/    →  the builder sees these
+Tests/HeldoutTests/    →  sealed; absent from the builder's checkout
+```
+
+`Package.swift` is Swift *code*, evaluated at build time — so declare the
+held-out target only when its directory is actually present:
+
+```swift
+// swift-tools-version:5.9
+import PackageDescription
+import Foundation
+
+// #filePath, not "Tests/HeldoutTests": the manifest is NOT evaluated with the
+// package root as its working directory, so a relative path checks the wrong
+// place, comes back true, and the sealed build fails with
+//   "Source files for target HeldoutTests should be located under ..."
+let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+let heldoutPresent = FileManager.default.fileExists(
+    atPath: root.appendingPathComponent("Tests/HeldoutTests").path)
+
+var targets: [Target] = [
+    .target(name: "App"),
+    .testTarget(name: "VisibleTests", dependencies: ["App"]),
+]
+if heldoutPresent {
+    targets.append(.testTarget(name: "HeldoutTests", dependencies: ["App"]))
+}
+
+let package = Package(name: "App", targets: targets)
+```
+
+Two consequences you must respect:
+
+- **Run the held-out suite with `--manifest-cache none`.** SwiftPM caches the
+  evaluated manifest keyed on the manifest's *contents*, not on the filesystem
+  it inspected. Without the flag a run can reuse a manifest evaluated while the
+  seal was in the other state, and the held-out target silently vanishes —
+  reporting `Executed 0 tests` as success.
+- **Run it in a fresh checkout**, never by restoring the directory in place.
+  `.build` caches the target list too. Bodega already does this: the seal is a
+  sparse-checkout worktree, and CI unpacks `HELDOUT_TESTS` into a clean tree.
+
+Before you finish, verify the seal by hand: move `Tests/HeldoutTests` aside, run
+`swift build`, confirm it succeeds, and put it back. If the build breaks, the
+manifest is wrong and no task will ever pass.
+
 ## CONTRACT.md — signed by the human, immutable thereafter
 
 ```markdown
@@ -67,5 +131,9 @@ contract with a new signature, not a quiet edit.
 - [ ] no held-out test references an internal symbol or path
 - [ ] held-out files are listed in `.gitignore` for worker worktrees / excluded
       by sparse checkout (Phase C) — physical absence, not a promise
+- [ ] **the visible suite builds and runs with the held-out directory removed** —
+      checked by actually removing it, not by reading the manifest
+- [ ] the visible tests can be sliced per task, so BLUEPRINT can write a
+      `verify` command narrower than the whole suite
 
 End with the standard block (`STATION: exam-board`).

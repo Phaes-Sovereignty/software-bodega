@@ -136,6 +136,46 @@ else
   printf '%s\n' "$SEAL_OUT" | sed 's/^/  /'; bad "seal tests failed"
 fi
 
+# --- 5b. compiled-toolchain support ----------------------------------------
+head_ "5b. Compiled toolchains (Swift)"
+# The toolchain profile is what lets a project declare how it is built instead
+# of the factory assuming Python. It has to load in a plain shell.
+if [ -f docs/toolchains/swift.env ]; then
+  if TC_OUT="$(bash -c '. docs/toolchains/swift.env; printf "%s|%s" "$VISIBLE_CMD" "$FACTORY_ROLE_TIMEOUT"' 2>&1)"; then
+    case "$TC_OUT" in
+      *"swift test"*"|"*[0-9]) ok "swift toolchain profile sources cleanly ($TC_OUT)" ;;
+      *) bad "swift profile loaded but looks wrong: $TC_OUT" ;;
+    esac
+  else
+    bad "swift toolchain profile does not source: $TC_OUT"
+  fi
+else
+  bad "docs/toolchains/swift.env is missing"
+fi
+# The seal has to survive a compiled build: a test target named unconditionally
+# in Package.swift breaks the build the moment the directory is sealed away, and
+# then every task parks. The exam board is where that gets decided.
+grep -q "FileManager" skills/exam-board/SKILL.md \
+  && ok "exam board declares the held-out target conditionally" \
+  || bad "exam board does not explain how the seal survives a Swift build"
+grep -q "filePath" skills/exam-board/SKILL.md \
+  && ok "exam board anchors the seal check to #filePath, not a relative path" \
+  || bad "exam board uses a relative path for the seal check (resolves elsewhere)"
+grep -q "manifest-cache none" skills/exam-board/SKILL.md \
+  && ok "held-out run disables the manifest cache" \
+  || bad "held-out run can reuse a manifest evaluated in the other seal state"
+grep -q "XCTest" skills/exam-board/SKILL.md \
+  && ok "exam board specifies XCTest for Swift projects" || bad "no XCTest guidance"
+# Per-task verification: the gate is the task's own slice, not the whole suite.
+grep -q "^Verify:" skills/blueprint/SKILL.md \
+  && ok "blueprint emits a per-task Verify: line" || bad "blueprint does not emit Verify:"
+grep -q "toolchain.env" skills/work-order/SKILL.md \
+  && ok "work order writes the verification gate to toolchain.env" \
+  || bad "work order does not declare the toolchain"
+grep -q "toolchain.env" scripts/lib/status.sh \
+  && ok "stations load the project's toolchain profile" \
+  || bad "toolchain.env is never sourced"
+
 # --- 6. CI workflow --------------------------------------------------------
 head_ "6. CI workflow"
 if python3 - <<'PY' 2>/dev/null
