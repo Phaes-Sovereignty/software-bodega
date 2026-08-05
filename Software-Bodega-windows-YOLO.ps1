@@ -111,7 +111,7 @@ if ($Mode -eq "init") {
     # Loud, not silent: a swallowed copy error leaves a project with no
     # scripts/ that only fails later with "No such file or directory".
     $failed = @()
-    foreach ($item in @("skills", "scripts", "foreman", "models.env", "AGENTS.md", "README.md", ".github")) {
+    foreach ($item in @("skills", "scripts", "foreman", "docs", "models.env", "AGENTS.md", "README.md", ".github")) {
         $src = Join-Path $Template $item
         if (-not (Test-Path $src)) { $failed += "$item(missing-in-template)"; continue }
         try { Copy-Item -Recurse -Force $src -Destination $Dir -ErrorAction Stop }

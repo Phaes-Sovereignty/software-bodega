@@ -97,7 +97,7 @@ if [ "$MODE" = "init" ]; then
   # Loud, not silent: a swallowed cp error once left a project with no
   # scripts/ and only surfaced later as "No such file or directory".
   COPY_FAIL=""
-  for item in skills scripts foreman models.env AGENTS.md README.md .github; do
+  for item in skills scripts foreman docs models.env AGENTS.md README.md .github; do
     [ -e "$TEMPLATE/$item" ] || { COPY_FAIL="$COPY_FAIL $item(missing-in-template)"; continue; }
     cp -R "$TEMPLATE/$item" "$DIR/" || COPY_FAIL="$COPY_FAIL $item"
   done
