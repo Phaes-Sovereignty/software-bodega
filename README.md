@@ -13,6 +13,69 @@ Two pipelines live here:
   visible **and held-out** exams → a cross-family judge posts a verdict → you
   merge. Scripts and CI only — there is deliberately no state machine here.
 
+## Start here
+
+Clone this repo, then run the launcher for your platform. It asks for a project
+folder, sets it up (never destructively), and opens a terminal there with one
+agent session that takes it from there.
+
+| Platform | Normal | Unattended test run |
+|---|---|---|
+| macOS | `Software-Bodega-mac.command` | `Software-Bodega-mac-YOLO.command` |
+| Linux | `Software-Bodega-linux.sh` | `Software-Bodega-linux-YOLO.sh` |
+| Windows | `Software-Bodega-windows.ps1` | `Software-Bodega-windows-YOLO.ps1` |
+
+On macOS the `.command` files are double-clickable from Finder. Everywhere,
+they also take arguments:
+
+```bash
+./Software-Bodega-mac.command                     # pick a folder
+./Software-Bodega-linux.sh ~/my-project           # skip the picker
+./Software-Bodega-linux.sh ~/my-project --no-launch   # set up only
+```
+```powershell
+.\Software-Bodega-windows.ps1 -Dir C:\code\my-project
+```
+
+**What YOLO changes:** the human *stops* only — no tool-approval prompts, no
+signature gates, no between-station questions. It does **not** relax
+verification: the contract stays immutable, tests are never weakened, held-out
+exams stay sealed, and the run **stops before merging**. A test that merges
+itself has removed the last thing between a bad night and `main`. Point it at a
+scratch folder.
+
+### Requirements
+
+- **[oh-my-pi](https://github.com/anthropics/oh-my-pi) (`omp`)** on your PATH — see *Swapping the harness* below if you use something else.
+- **git**
+- **bash** — the stations are shell scripts. macOS and Linux have it; on Windows install [Git for Windows](https://git-scm.com/download/win) or enable WSL, and the launcher will find it.
+- **Python 3.11+** for the Phase C foreman (optional; the shell pipeline runs without it).
+
+### Swapping the harness
+
+Software Bodega is **built for oh-my-pi**, but nothing in the pipeline is tied
+to it. Prompts name **roles**, never models, and every role's command lives in
+one file — so pointing it at Claude Code, codex, grok, a local llama.cpp
+server, or anything else that takes a prompt and returns text is a config edit,
+not a rewrite.
+
+The fastest way to switch: open this repo in whatever coding agent you already
+use and ask it to swap the harness. Point it at `models.env` and
+`foreman/routing.yaml` and say which CLI you want. It will need to work out
+four things per role, all of which `scripts/selftest.sh` verifies for you:
+
+1. the non-interactive invocation (most CLIs use `-p` or an `exec` subcommand)
+2. whether the prompt goes as an **argument** or on **stdin**
+3. whether the CLI needs a permission flag to write files
+4. which model family the role resolves to — the judge must not share a family
+   with the executor, and the plan reviewer must not share one with the planner
+
+Then run `bash scripts/selftest.sh`. It probes every adapter live and fails
+loudly with the reason if one is misconfigured, so you find out in a minute
+rather than at 3am. The `## Adapter facts` section below lists the traps that
+cost the most time when this was wired up the first time — a new harness will
+have its own.
+
 ## Run a project through it
 
 ```bash
@@ -256,20 +319,3 @@ that is the only scheduled manual chore this system has.
 `CONTRACT.md` is immutable once signed. A contract that turned out wrong gets a
 new contract and a new signature, never a quiet edit.
 
-## Starting a project
-
-Double-click **`~/Quickie/Software Bodega.command`**. It asks for a folder, sets
-it up if it is not already a Bodega project (never destructively), and opens
-iTerm there running the interview.
-
-Or from a shell:
-
-```bash
-"~/Quickie/Software Bodega.command"                  # pick a folder
-"~/Quickie/Software Bodega.command" ~/my-project     # skip the picker
-"~/Quickie/Software Bodega.command" ~/my-project --no-launch   # set up only
-```
-
-Inside a project, `bash scripts/interview.sh` starts (or resumes) the interview
-directly. The interview is the only interactive station; everything after it
-runs unattended.
