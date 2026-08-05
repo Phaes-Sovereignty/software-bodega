@@ -19,7 +19,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 cd "$ROOT" || exit 1
 
-MODEL="${BODEGA_CONDUCTOR_MODEL:-claude-opus-5}"
+MODEL="${BODEGA_CONDUCTOR_MODEL:-claude-opus-4-8}"
 MODE="new"
 YOLO=0
 for a in "$@"; do

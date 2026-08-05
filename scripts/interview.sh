@@ -18,7 +18,7 @@ cd "$ROOT" || exit 1
 # shellcheck source=lib/status.sh
 . "$HERE/lib/status.sh" 2>/dev/null || true
 
-MODEL="${BODEGA_PLANNER_MODEL:-claude-opus-5}"
+MODEL="${BODEGA_PLANNER_MODEL:-claude-opus-4-8}"
 STAGE="$(awk -F': *' '/^STAGE:/{print $2; exit}' factory/STATE.md 2>/dev/null || echo IDLE)"
 
 printf '\033[1m Software Bodega \033[0m\n'
