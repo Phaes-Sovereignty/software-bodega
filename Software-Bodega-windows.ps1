@@ -11,6 +11,15 @@
   Requires bash: the stations are shell scripts. Git for Windows (Git Bash) or
   WSL both work; the launcher finds whichever is installed.
 
+  ⚠️  UNTESTED ON THIS PLATFORM. Written and syntax-checked, but never run on a
+      real Windows machine — only the macOS launcher has been exercised end to
+      end. The setup logic is shared and verified; what is unproven here is the
+      folder picker, the bash discovery, and the Windows Terminal launch. If it
+      misbehaves, the fallback is exact and safe:
+          .\Software-Bodega-windows.ps1 -Dir <dir> -NoLaunch   # set up only
+          cd <dir>; bash scripts/start.sh                       # then start it
+      Please report what broke.
+
 .EXAMPLE
   .\Software-Bodega-windows.ps1
   .\Software-Bodega-windows.ps1 -Dir C:\code\my-project

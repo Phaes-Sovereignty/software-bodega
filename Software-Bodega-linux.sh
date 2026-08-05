@@ -15,6 +15,15 @@
 #   ./Software-Bodega-linux.sh                    pick a folder, set up, launch
 #   ./Software-Bodega-linux.sh <dir>              skip the picker
 #   ./Software-Bodega-linux.sh <dir> --no-launch  set up only
+#
+# ⚠️  UNTESTED ON THIS PLATFORM. Written and syntax-checked, but never run on a
+#     real Linux desktop — only the macOS launcher has been exercised end to
+#     end. The setup logic is shared and verified; what is unproven here is the
+#     folder picker (zenity/kdialog) and the terminal launch. If it misbehaves,
+#     the fallback is exact and safe:
+#         bash Software-Bodega-linux.sh <dir> --no-launch   # set up only
+#         cd <dir> && bash scripts/start.sh                 # then start it
+#     Please report what broke.
 
 set -uo pipefail
 

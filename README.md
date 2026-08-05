@@ -13,45 +13,174 @@ Two pipelines live here:
   visible **and held-out** exams → a cross-family judge posts a verdict → you
   merge. Scripts and CI only — there is deliberately no state machine here.
 
-## Start here
+## Installation
 
-Clone this repo, then run the launcher for your platform. It asks for a project
-folder, sets it up (never destructively), and opens a terminal there with one
-agent session that takes it from there.
+### 1. Prerequisites
 
-| Platform | Normal | Unattended test run |
+| | Why | Check |
 |---|---|---|
-| macOS | `Software-Bodega-mac.command` | `Software-Bodega-mac-YOLO.command` |
-| Linux | `Software-Bodega-linux.sh` | `Software-Bodega-linux-YOLO.sh` |
-| Windows | `Software-Bodega-windows.ps1` | `Software-Bodega-windows-YOLO.ps1` |
+| **[oh-my-pi](https://github.com/anthropics/oh-my-pi)** (`omp`) | The agent harness every station runs on. See *Swapping the harness* if you use something else. | `omp --version` |
+| **git** | The night shift commits per task and needs a repo. | `git --version` |
+| **bash** | The stations are shell scripts. | `bash --version` |
+| **Python 3.11+** *(optional)* | Only the Phase C foreman. The shell pipeline runs without it. | `python3 --version` |
 
-On macOS the `.command` files are double-clickable from Finder. Everywhere,
-they also take arguments:
+macOS and Linux have bash already. On **Windows** install
+[Git for Windows](https://git-scm.com/download/win) or enable WSL — the
+launcher finds either, and refuses with an install pointer if neither is there.
+
+You also need your model provider logged in through `omp` (`omp models` should
+list them). Out of the box Bodega expects four families to be reachable:
+anthropic, xai, openai, and a local llama.cpp server for the fallback rung.
+Fewer is fine — see *Configuring models*.
+
+### 2. Clone
 
 ```bash
-./Software-Bodega-mac.command                     # pick a folder
-./Software-Bodega-linux.sh ~/my-project           # skip the picker
-./Software-Bodega-linux.sh ~/my-project --no-launch   # set up only
+git clone https://github.com/Phaes-Sovereignty/software-bodega.git
+cd software-bodega
+```
+
+### 3. Make the launcher runnable
+
+**macOS / Linux** — git preserves the executable bit, but if you downloaded a
+zip instead of cloning:
+
+```bash
+chmod +x Software-Bodega-*.command Software-Bodega-*.sh
+```
+
+macOS may also quarantine files that arrived via a browser. If double-clicking
+does nothing:
+
+```bash
+xattr -d com.apple.quarantine Software-Bodega-mac.command
+```
+
+**Windows** — PowerShell blocks unsigned scripts by default. Allow it for the
+current session only (this does not change your machine's policy):
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+Unblock-File .\Software-Bodega-windows.ps1
+```
+
+### 4. Verify
+
+```bash
+bash scripts/selftest.sh
+```
+
+This runs every mechanical check **and** probes each configured model live. It
+should end `all N checks passed`. If an adapter is misconfigured it says which
+one and why — worth doing before you trust it with a night. `--offline` skips
+the live probes.
+
+---
+
+## Use
+
+### Launchers
+
+| Platform | Normal | Unattended test run | Tested |
+|---|---|---|---|
+| macOS | `Software-Bodega-mac.command` | `Software-Bodega-mac-YOLO.command` | ✅ end to end |
+| Linux | `Software-Bodega-linux.sh` | `Software-Bodega-linux-YOLO.sh` | ⚠️ see below |
+| Windows | `Software-Bodega-windows.ps1` | `Software-Bodega-windows-YOLO.ps1` | ⚠️ see below |
+
+> ⚠️ **Only the macOS launcher has been run end to end.** The Linux and Windows
+> launchers are written and syntax-checked but have never executed on a real
+> machine of that platform. The *setup* logic is shared and verified across all
+> three; what is unproven is each platform's folder picker and terminal launch.
+> If one misbehaves, the two-step fallback is exact and safe — set up without
+> launching, then start the conductor yourself:
+>
+> ```bash
+> bash Software-Bodega-linux.sh ~/my-project --no-launch   # Linux
+> cd ~/my-project && bash scripts/start.sh
+> ```
+> ```powershell
+> .\Software-Bodega-windows.ps1 -Dir C:\code\my-project -NoLaunch   # Windows
+> cd C:\code\my-project; bash scripts/start.sh
+> ```
+>
+> Please open an issue with what broke.
+
+On macOS the `.command` files are double-clickable from Finder. Everywhere they
+also take arguments:
+
+```bash
+./Software-Bodega-mac.command                          # pick a folder
+./Software-Bodega-linux.sh ~/my-project                # skip the picker
+./Software-Bodega-linux.sh ~/my-project --no-launch    # set up only
 ```
 ```powershell
 .\Software-Bodega-windows.ps1 -Dir C:\code\my-project
 ```
 
-**What YOLO changes:** the human *stops* only — no tool-approval prompts, no
-signature gates, no between-station questions. It does **not** relax
-verification: the contract stays immutable, tests are never weakened, held-out
-exams stay sealed, and the run **stops before merging**. A test that merges
-itself has removed the last thing between a bad night and `main`. Point it at a
-scratch folder.
+The launcher never deletes anything. Pointed at a folder that already has
+files, it adds Bodega's machinery alongside them and tells you the item count
+first. Pointed at an existing Bodega project, it resumes instead of re-scaffolding.
 
-### Requirements
+### What happens next
 
-- **[oh-my-pi](https://github.com/anthropics/oh-my-pi) (`omp`)** on your PATH — see *Swapping the harness* below if you use something else.
-- **git**
-- **bash** — the stations are shell scripts. macOS and Linux have it; on Windows install [Git for Windows](https://git-scm.com/download/win) or enable WSL, and the launcher will find it.
-- **Python 3.11+** for the Phase C foreman (optional; the shell pipeline runs without it).
+One agent session opens and **asks its first question immediately**. From
+there your whole job is four things:
 
-### Swapping the harness
+**1. Answer the interview** (~30 min). One question at a time, each with a
+recommended answer you can accept with Enter. It stops when *two engineers
+would ship the same behavior* — usually 5–9 questions. Then it writes
+`factory/BRIEF.md`.
+
+**◉ 2. Sign the brief.** Read it before saying yes — every later gate derives
+from it.
+
+The conductor then runs SPEC → BLUEPRINT → EXAM BOARD → WORK ORDER → PLAN
+REVIEW itself, in the background, reporting as it goes. **Budget 1–2 hours.**
+Planner stations legitimately take 25–40 minutes each and are I/O-bound, so low
+CPU is not a hang.
+
+**◉ 3. Sign the contract** when `factory/CONTRACT.md` appears. After signing it
+is immutable — nothing may edit or weaken it, including you.
+
+Expect the plan review to **reject** something. A different model family
+reviews the plan; rejection is the gate working. It revises twice on its own
+before asking you.
+
+Then the night shift runs unattended — one task per fresh context — and the
+inspector produces a verdict:
+
+```
+Verdict on <SHA>: SHIP | FIX FIRST | NOT DONE
+```
+
+**◉ 4. Merge.** Nothing self-merges, ever. On `FIX FIRST` the conductor works
+the list and re-inspects first.
+
+### YOLO mode
+
+The YOLO launchers remove the human *stops* — no tool-approval prompts, no
+signature gates, no between-station questions — so you can watch the whole
+pipeline run unattended. They do **not** relax verification: the contract stays
+immutable, tests are never weakened, held-out exams stay sealed, and the run
+**stops before merging**. A test that merges itself has removed the last thing
+between a bad night and `main`.
+
+Point YOLO at a scratch folder. Workers write with your user's permissions and
+nothing confines them to the project directory.
+
+### Where things are while it runs
+
+```bash
+cat factory/STATE.md      # current stage — the single source of truth
+cat factory/progress.md   # the night diary: TASK|status|SHA|tests|note
+cat factory/REVIEW.md     # the inspector's verdict, first line
+tail -f /tmp/bodega-boot.log
+```
+
+A parked task in `progress.md` carries its reason, including any question the
+worker couldn't answer alone.
+
+## Swapping the harness
 
 Software Bodega is **built for oh-my-pi**, but nothing in the pipeline is tied
 to it. Prompts name **roles**, never models, and every role's command lives in
@@ -59,10 +188,10 @@ one file — so pointing it at Claude Code, codex, grok, a local llama.cpp
 server, or anything else that takes a prompt and returns text is a config edit,
 not a rewrite.
 
-The fastest way to switch: open this repo in whatever coding agent you already
-use and ask it to swap the harness. Point it at `models.env` and
-`foreman/routing.yaml` and say which CLI you want. It will need to work out
-four things per role, all of which `scripts/selftest.sh` verifies for you:
+The fastest way to switch: **open this repo in whatever coding agent you
+already use and ask it to swap the harness.** Point it at `models.env` and
+`foreman/routing.yaml` and say which CLI you want. It needs to work out four
+things per role, all of which `scripts/selftest.sh` verifies for you:
 
 1. the non-interactive invocation (most CLIs use `-p` or an `exec` subcommand)
 2. whether the prompt goes as an **argument** or on **stdin**
@@ -71,12 +200,15 @@ four things per role, all of which `scripts/selftest.sh` verifies for you:
    with the executor, and the plan reviewer must not share one with the planner
 
 Then run `bash scripts/selftest.sh`. It probes every adapter live and fails
-loudly with the reason if one is misconfigured, so you find out in a minute
-rather than at 3am. The `## Adapter facts` section below lists the traps that
-cost the most time when this was wired up the first time — a new harness will
-have its own.
+loudly with the reason if one is misconfigured, so a bad swap surfaces in a
+minute rather than at 3am. *Adapter facts learned the hard way* below lists the
+traps that cost the most time the first time this was wired up — a different
+harness will have its own, and that section is the shape of what to look for.
 
-## Run a project through it
+## Running the stations manually
+
+The conductor does all of this for you. This is the breakdown if you want to
+drive a station yourself, or to see what it is actually running.
 
 ```bash
 # 0. one-time: check every headless adapter answers
