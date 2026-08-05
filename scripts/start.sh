@@ -62,6 +62,13 @@ PROMPT="$(
   printf 'plan.json, CONTRACT.md, any test, or any source file yourself.\n'
 )"
 
+# An argument-mode prompt must not START with a dash or omp's parser claims it
+# as a flag and exits before the model sees anything. Every skill file opens
+# with YAML frontmatter (`---`), so this fires on EVERY prompt built here.
+# run_role has the same guard; these scripts call omp directly and need it too.
+case "$PROMPT" in -*) PROMPT="
+$PROMPT" ;; esac
+
 if [ "$MODE" = "print" ]; then printf '%s\n' "$PROMPT"; exit 0; fi
 
 printf '\033[1m  Software Bodega \033[0m\n'

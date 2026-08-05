@@ -32,6 +32,27 @@ else
   printf '  \033[33m–\033[0m shellcheck not installed (optional; see README deviations)\n'
 fi
 
+# --- 1b. entry points guard the leading-dash trap ---------------------------
+head_ "1b. Entry-point prompt guards"
+# Every skill file opens with YAML frontmatter, so any prompt built from one
+# starts with '---'. A CLI in argument mode reads that as a flag and exits
+# before the model sees anything. run_role guards it; scripts that call a CLI
+# directly must guard it too, and this is the third time it has bitten.
+for f in scripts/start.sh scripts/interview.sh; do
+  [ -e "$f" ] || continue
+  if grep -q 'case "$PROMPT" in -\*)' "$f"; then
+    ok "$f guards a dash-leading prompt"
+  else
+    bad "$f passes a prompt to a CLI without the leading-dash guard"
+  fi
+done
+# and the guard must actually work on the real assembled prompt
+if [ -x scripts/start.sh ] || [ -f scripts/start.sh ]; then
+  first="$(bash scripts/start.sh --print 2>/dev/null | head -c 1)"
+  [ "$first" != "-" ] && ok "start.sh --print does not begin with a dash" \
+    || bad "start.sh still emits a prompt beginning with a dash"
+fi
+
 # --- 2. JSON schemas -------------------------------------------------------
 head_ "2. JSON schemas validate against fixtures"
 for k in spec decompose plan; do

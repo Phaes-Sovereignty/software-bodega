@@ -52,4 +52,11 @@ PROMPT="$(
   printf 'question immediately; do not summarise these instructions back.\n'
 )"
 
+# An argument-mode prompt must not START with a dash or omp's parser claims it
+# as a flag and exits before the model sees anything. Every skill file opens
+# with YAML frontmatter (`---`), so this fires on EVERY prompt built here.
+# run_role has the same guard; these scripts call omp directly and need it too.
+case "$PROMPT" in -*) PROMPT="
+$PROMPT" ;; esac
+
 exec omp --model "$MODEL" "$PROMPT"
