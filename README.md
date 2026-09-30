@@ -6,9 +6,9 @@ that.
 
 Two pipelines live here:
 
-- **Bootstrap** (once per project): INTERVIEW → SPEC → BLUEPRINT → EXAM BOARD →
-  WORK ORDER → NIGHT SHIFT → INSPECTOR. Produces a walking skeleton, two exam
-  suites, and a backlog of small issues.
+- **Bootstrap** (once per project): INTERVIEW → SPEC → BLUEPRINT → TOOLCHAIN →
+  EXAM BOARD → WORK ORDER → NIGHT SHIFT → INSPECTOR. Produces a walking
+  skeleton, two exam suites, and a backlog of small issues.
 - **Small Loop** (forever after): issue → triage → worker opens a PR → CI runs
   visible **and held-out** exams → a cross-family judge posts a verdict → you
   merge. Scripts and CI only — there is deliberately no state machine here.
@@ -70,10 +70,29 @@ Unblock-File .\Software-Bodega-windows.ps1
 bash scripts/selftest.sh
 ```
 
-This runs every mechanical check **and** probes each configured model live. It
-should end `all N checks passed`. If an adapter is misconfigured it says which
-one and why — worth doing before you trust it with a night. `--offline` skips
-the live probes.
+This runs every check **and** probes each configured model live. If an adapter
+is misconfigured it says which one and why — worth doing before you trust it with
+a night. `--offline` skips the live probes.
+
+Most of it is **behavioural**: it builds throwaway repos, seals worktrees, runs a
+real Swift package through an exam-and-verify cycle, and captures the prompt a
+worker would actually receive. It does not grep source files for the words
+`toolchain.env` or `sparse-checkout` and call that a pass — that is how the
+compiled-toolchain gap stayed hidden while every check was green.
+
+Two things the summary tells you:
+
+- **`(N skipped)` is not a pass.** The Swift cycle needs a working SwiftPM and
+  the workflow/foreman checks need PyYAML; when either is unavailable the suite
+  says so and counts it, rather than rolling a no-op into "all checks passed".
+  Point it at an interpreter that has the dependency:
+
+  ```bash
+  PYTHON=/path/to/venv/bin/python bash scripts/selftest.sh
+  ```
+
+- The `---FACTORY_STATUS---` block repeats the skip count, so a conductor reading
+  `log.md` cannot mistake a partial verification for a complete one.
 
 ---
 
@@ -117,9 +136,23 @@ also take arguments:
 .\Software-Bodega-windows.ps1 -Dir C:\code\my-project
 ```
 
-The launcher never deletes anything. Pointed at a folder that already has
-files, it adds Bodega's machinery alongside them and tells you the item count
-first. Pointed at an existing Bodega project, it resumes instead of re-scaffolding.
+The launcher never overwrites anything. Pointed at a folder that already has
+files it scans first (`scripts/lib/merge.sh`):
+
+- **Bodega machinery** (`scripts/`, `skills/`, `foreman/`, `models.env`) must be
+  Bodega's bytes or the factory is not the factory. If one of those paths is
+  already taken by something else, the setup **aborts and writes nothing**, and
+  tells you which path. Half-merging into a folder whose `scripts/start.sh` is
+  somebody else's file gives you a project that runs your script while believing
+  it is Bodega's.
+- **Your documents and workflows** are kept exactly as they are; Bodega installs
+  its copies alongside as `README.bodega.md`, `AGENTS.bodega.md`,
+  `.github/workflows/factory.yml`. You are told what was renamed — a silently
+  skipped CI file means the held-out gates quietly never exist, which is as bad
+  as clobbering it.
+
+Pointed at an existing Bodega project, it resumes instead of re-scaffolding.
+`bash scripts/tests/test-launcher.sh` checks the bytes, not the promise.
 
 ### What happens next
 
@@ -180,6 +213,41 @@ tail -f /tmp/bodega-boot.log
 A parked task in `progress.md` carries its reason, including any question the
 worker couldn't answer alone.
 
+### When a task fails: the escalation ladder
+
+Repair loops cap, then the ladder climbs, then the task parks. Never loop forever.
+
+```
+repair x2 -> rung 0 resample N=3 -> rung 1 planner -> rung 2 plan_judge
+          -> rung 3 local fallback -> PARK
+```
+
+The ladder is **data**, in `models.env`:
+
+```bash
+ESCALATION_LADDER='resample:executor:3:execution single:planner single:plan_judge single:fallback'
+JUDGE_ROLES='judge plan_judge glue triage'
+ESCALATION_TRIGGER='verify_failure_only'
+```
+
+It used to live only in `foreman/routing.yaml`, which the bash loop cannot parse
+without PyYAML, so `nightshift.sh` stopped after resample and the planner rung,
+the plan-judge rung and the local fallback were pure decoration. `Router` now
+reads the same string, and `scripts/tests/test-ladder.sh` asserts the two readers
+agree, because a ladder nobody climbs leaves nothing in the logs to notice.
+
+Three rules the ladder keeps:
+
+- **Only a verify failure spends a rung.** Not a low-confidence self-report, not
+  elapsed time, not an agent asking: all things a failing worker can manufacture.
+- **Each rung starts from a clean tree.** The loop resets to the task's baseline
+  before invoking the next family, so a failed attempt's damage is not inherited
+  and the baseline count still describes what is on disk.
+- **Every rung that runs is recorded as an author.** Whoever wrote the code joins
+  `factory/.planning/author-families.txt`, and the inspector picks its judge from
+  `JUDGE_ROLES` against that set. That is what stops Opus fixing a task and then
+  Opus judging it; the old startup check compared two role names and passed.
+
 ## Swapping the harness
 
 Software Bodega is **built for oh-my-pi**, but nothing in the pipeline is tied
@@ -196,8 +264,10 @@ things per role, all of which `scripts/selftest.sh` verifies for you:
 1. the non-interactive invocation (most CLIs use `-p` or an `exec` subcommand)
 2. whether the prompt goes as an **argument** or on **stdin**
 3. whether the CLI needs a permission flag to write files
-4. which model family the role resolves to — the judge must not share a family
-   with the executor, and the plan reviewer must not share one with the planner
+4. which model family the role resolves to — the inspector must not share a
+   family with whichever role actually wrote the code, and the plan reviewer must
+   not share one with the planner. Keep at least two distinct families among
+   `JUDGE_ROLES` or the inspector will refuse to judge.
 
 Then run `bash scripts/selftest.sh`. It probes every adapter live and fails
 loudly with the reason if one is misconfigured, so a bad swap surfaces in a
@@ -222,18 +292,27 @@ bash scripts/selftest.sh
 #    skills/spec-freeze  -> factory/.planning/spec.json
 #    skills/blueprint    -> factory/.planning/decompose.json + factory/tasks/*.md
 
-# 4. EXAM BOARD — fresh, spec-blind session
-#    skills/exam-board   -> factory/CONTRACT.md + tests/visible + tests/heldout
+# 4. TOOLCHAIN — mechanical, no model
+#    scripts/toolchain.sh -> factory/toolchain.env (HELDOUT_DIR, *_CMD), verified
+#    Runs BEFORE the exams on purpose: the exam board has to be told where the
+#    held-out suite will live, and in a compiled project that is a build-manifest
+#    fact, not a directory the factory can name afterwards.
+bash scripts/toolchain.sh resolve && bash scripts/toolchain.sh check
+
+# 5. EXAM BOARD — fresh, spec-blind session
+#    skills/exam-board   -> factory/CONTRACT.md + the two suites, in the
+#                          directories the toolchain just declared
 #                                                  ◉ you sign CONTRACT.md
 
-# 5. WORK ORDER + cross-family plan review
+# 6. WORK ORDER + cross-family plan review
 #    skills/work-order   -> factory/.planning/plan.json + factory/HANDOFF.md
 #                                                  ◈ codex reviews the plan
 
-# 6. NIGHT SHIFT — unattended                      ◉ you type go, then sleep
-bash scripts/nightshift.sh
+# 7. NIGHT SHIFT — unattended                      ◉ you type go, then sleep
+bash scripts/foreman.sh launch  # SEALED: held-out suite physically absent,
+                             # night's commits land on a branch you merge
 
-# 7. INSPECTOR — before you wake up
+# 8. INSPECTOR — before you wake up
 #    skills/inspector    -> factory/REVIEW.md ("Verdict on <SHA>: SHIP|FIX FIRST|NOT DONE")
 #                                                  ◉ you merge
 ```
@@ -256,25 +335,65 @@ bash scripts/runner.sh     # oldest ready issue -> branch -> PR. Never merges.
 | `factory/tasks/*.md` | one file per task — what the night shift reads |
 | `factory/tests/visible/` | the builder sees these and drives TDD against them |
 | `factory/tests/heldout/` | **the builder never sees these** |
+| `factory/toolchain.env` | how THIS project is built and examined — `HELDOUT_DIR` says where the two suites actually live (Swift: `Tests/HeldoutTests`) |
+
+The two test paths above are the **defaults**. A project declares its own in
+`factory/toolchain.env`, and every consumer asks `scripts/lib/toolchain.sh`
+rather than assuming — see *The held-out seal*.
 | `factory/progress.md` `log.md` | append-only diaries. Never rewritten. |
 | `skills/` | the eight station prompts. Roles only, no model names. |
 | `scripts/` | night shift, small loop runner, triage, status parser |
 
 ## The held-out seal
 
-The single most important mechanism here. Held-out exams only mean something if
-the builder physically cannot read them:
+The single most important mechanism here, and the one that was quietly broken
+the longest. Held-out exams only mean something if the builder cannot read them.
 
-- **Worker worktrees** are created with `git sparse-checkout` excluding
-  `factory/tests/heldout/`, then the directory is removed for good measure.
-  `runner.sh` aborts if the directory exists anyway.
-- **CI** fetches the held-out suite from the `HELDOUT_TESTS` repo secret
-  (base64 tarball) at run time. If the secret is missing, the job **fails** —
-  it does not skip. Missing evidence is never a pass.
-- **CI** also fails any PR whose diff touches `factory/tests/heldout/`.
+**One answer to "where are the held-out tests".** `factory/toolchain.env`
+declares `HELDOUT_DIR`; `scripts/lib/toolchain.sh` resolves it; the seal, CI's
+tarball and scope check, `runner.sh`, `inspect.sh` and `foreman/contracts.py` all
+ask that one function. They used to each hard-code `factory/tests/heldout` while
+the exam-board skill told a Swift project to write `Tests/HeldoutTests` — so for
+Swift the seal removed an empty directory and the builder read its own exam while
+every log line said it could not.
 
-Three independent nets sit behind every change: visible exams the builder must
-pass, held-out exams it cannot see, and a cross-family judge plus your merge
+What runs now:
+
+- **The night shift is launched sealed.** `bash scripts/foreman.sh launch` builds a
+  sparse-checkout worktree in which the held-out directory does not exist, runs
+  `nightshift.sh` inside it, and puts the night's commits on a named branch.
+  Calling `nightshift.sh` directly runs workers in the main checkout, where the
+  files are right there; the loop now says so out loud (`seal: NONE`) and records
+  it in `log.md` instead of implying otherwise.
+- **`runner.sh`** (Small Loop) seals the same way, through the same
+  `create_sealed_tree` function the seal test calls — so the test cannot drift
+  from the product the way three hand-copied git sequences did.
+- **Seal steps are checked, not hoped for.** `git sparse-checkout init -q` exits
+  129 (there is no `-q`), and the old code sent that to `/dev/null`. The patterns
+  were never written, the seal degraded to `rm -rf`, and a worker got its exam
+  back with one `git checkout`. Every step now aborts on a nonzero exit, the
+  patterns are re-read to confirm they are live, and the tree is checked for
+  *not being empty* — an empty checkout passes "the directory is absent"
+  trivially while leaving the worker no code.
+- **Re-checked at commit time.** If a worker loosens the seal mid-task, the
+  commit is refused, the task parks with `seal_broken` in the diary, and the
+  night halts rather than continuing in a tree that just reached its own exam.
+- **CI** fetches the suite from the `HELDOUT_TESTS` secret into `$HELDOUT_DIR`
+  and runs `$HELDOUT_CMD`. A missing secret or missing command **fails** the job.
+- **CI** fails any PR whose diff touches `$HELDOUT_DIR`.
+
+### What the seal is not
+
+It is **detection, not containment**. A linked worktree shares the parent's
+object store, so `git sparse-checkout disable` followed by a checkout does bring
+the files back — measured, and asserted in `scripts/tests/test-foreman-launch.sh`
+so nobody has to rediscover it. Against a model that goes looking, that matters:
+it cannot do it by accident, cannot do it and have the work land, and cannot do
+it without `log.md` saying so. Real containment would be a second clone without
+the objects, or a container.
+
+Three independent nets still sit behind every change: visible exams the builder
+must pass, held-out exams it cannot see, and a cross-family judge plus your merge
 button. Nothing self-merges.
 
 ## Toolchains — Swift, and anything that isn't Python
@@ -290,8 +409,30 @@ EXTRA_GATE_CMD='bash scripts/check-target-graph.sh'   # optional
 FACTORY_ROLE_TIMEOUT=5400
 ```
 
-Copy `docs/toolchains/swift.env` as a starting point. The work order writes this
-file from the interview's answers; nothing here belongs in `models.env`.
+Copy `docs/toolchains/swift.env` as a starting point; nothing here belongs in
+`models.env`.
+
+```bash
+HELDOUT_DIR='Tests/HeldoutTests'   # the load-bearing line: this is what gets sealed
+```
+
+**`factory/toolchain.env` is written by the TOOLCHAIN station, which runs
+before the exam board** — `bash scripts/toolchain.sh resolve`. It used to be
+written by the work order, i.e. *after* the exams were authored, which is how a
+Swift project ended up with Python exam instructions and a seal pointed at a
+directory it does not use. The exam board has to be told where the held-out suite
+will live, and in a compiled project that path is a build-manifest fact
+(`Package.swift` names its test targets), not something the factory can decide
+retrospectively.
+
+`bash scripts/toolchain.sh check` then proves the declaration is real: every
+command's tool must exist on PATH, `HELDOUT_DIR` must exist (a seal pointed at a
+missing directory is vacuous), and the visible directory must not sit inside it.
+A `toolchain.env` with a typo in it parks every task with a failure that looks
+like the worker's fault, so the profile is verified before it is trusted, not
+after. Detection picks the starter profile from `Package.swift` /
+`pyproject.toml` / `package.json`; a project that already declared one is never
+overwritten.
 
 **Per-task verification.** Each task file carries a `Verify:` line — the
 narrowest command that can fail for that task, usually a `--filter` slice of the
@@ -361,9 +502,19 @@ swapping providers is a one-file edit:
 | plan_judge | openai | `codex exec --skip-git-repo-check` |
 | glue / triage | xai / anthropic | as configured |
 
-Independence invariants, enforced by `assert_cross_family` in
-`scripts/lib/status.sh`: the judge must not share a family with the executor,
-and the plan reviewer must not share one with the plan's author.
+Independence invariants: the plan reviewer must not share a family with the
+plan's author, and the inspector must not share one with **whoever actually wrote
+the code**.
+
+That second one is why the check is not `assert_cross_family judge executor`.
+The escalation ladder lets other roles write code — if Opus fixes a task and the
+judge role is also Opus, a role-vs-role check performed once at startup still
+passes, and the system grades its own homework with a verdict that looks exactly
+like a real one. So every rung that runs is recorded in
+`factory/.planning/author-families.txt`, and `inspect.sh` picks its judge from
+`JUDGE_ROLES` against that set at verdict time. If no configured judge role is
+outside the authoring families, the inspector **refuses** rather than falling
+back to a same-family judge.
 
 ## The foreman (Phase C)
 
@@ -371,15 +522,29 @@ Once `foreman/` exists it owns station transitions for the **bootstrap pipeline
 only**. The Small Loop stays scripts + CI forever, and the night loop keeps its
 own semantics — the foreman invokes `nightshift.sh`, it does not replace it.
 
+`launch` is not a convenience wrapper, it is the seal: it creates the
+sparse-checkout sandbox, points `FACTORY_ROOT` at it (running the main
+checkout's `nightshift.sh` with `cwd=<sandbox>` would `cd` straight back out of
+the sealed tree), sets `BODEGA_SEALED=1`, and gives the night a **named branch**
+instead of a detached HEAD — commits on a detached worktree disappear when the
+sandbox is pruned, so the branch is what makes "the results survive" true.
+
 ```bash
-python -m foreman init --probe   # validate routing, contract-test every adapter
-python -m foreman status         # where the line is and what is blocking it
-python -m foreman gate spec      # run a gate, record the verdict, transition
-python -m foreman gate --gc      # discard verdicts not bound to a live artifact
-python -m foreman launch         # night shift in a SEALED worktree
-python -m foreman resume         # continue after a crash or a BLOCKED state
-python -m foreman debrief --notify
+bash scripts/foreman.sh init --probe   # validate routing, contract-test every adapter
+bash scripts/foreman.sh status         # where the line is and what is blocking it
+bash scripts/foreman.sh gate spec      # run a gate, record the verdict, transition
+bash scripts/foreman.sh gate --gc      # discard verdicts not bound to a live artifact
+bash scripts/foreman.sh launch         # night shift in a SEALED worktree, on a branch
+bash scripts/foreman.sh resume         # continue after a crash or a BLOCKED state
+bash scripts/foreman.sh debrief --notify
 ```
+
+Use `scripts/foreman.sh`, not `python3 -m foreman`. The foreman needs an
+interpreter that can import yaml and the machine's default python3 frequently
+cannot — measured on three of the four pythons on the build host. `python3 -m
+foreman` dies at import, the conductor falls back to `nightshift.sh`, and the
+night runs unsealed. `foreman.sh` resolves the interpreter, sets PYTHONPATH so it
+works from any directory, and refuses loudly when nothing can do the job.
 
 What the foreman adds that prompts and scripts could not enforce:
 
@@ -395,19 +560,25 @@ What the foreman adds that prompts and scripts could not enforce:
 | `breakers.py` | 3 parks stop the night; 3 empty diffs park a task; the same error 5× parks; 30-minute cooldown then one half-open retry. |
 | `workers.py` | One `invoke(role, work_order)`. Judges are structurally incapable of receiving Implementation Notes. |
 
-Run the suite with `python3 -m unittest foreman.tests.test_foreman` (47 tests),
-or `bash scripts/selftest.sh` for everything.
+Run the suite with `python3 -m unittest foreman.tests.test_foreman` (needs PyYAML; the test count it prints is the
+number to quote, not one written into a README), or `bash scripts/selftest.sh` for everything.
 
 ## Scripts
 
 | Script | What it does |
 |---|---|
-| `scripts/selftest.sh` | every mechanical Phase B check. Run before trusting a night. `--offline` skips live model calls. |
-| `scripts/bootstrap.sh` | drives SPEC → BLUEPRINT → EXAM → WORKORDER → PLANREVIEW, one fresh session per station, gates between. `--from <stage>` resumes. |
-| `scripts/nightshift.sh` | the unattended night loop. |
-| `scripts/inspect.sh` | the inspector: suite ×2, held-out suite, tamper audit, scope ledger, SHA-bound verdict. |
+| `scripts/selftest.sh` | every check. Run before trusting a night. `--offline` skips live model calls; `PYTHON=<venv>` selects the interpreter for the foreman and workflow checks. |
+| `scripts/bootstrap.sh` | drives SPEC → BLUEPRINT → **TOOLCHAIN** → EXAM → WORKORDER → PLANREVIEW, one fresh session per station, gates between. `--from <stage>` resumes. |
+| `scripts/toolchain.sh` | `resolve` / `check` / `get <KEY>` — writes and verifies `factory/toolchain.env`, and is how every other consumer asks where the suites live. |
+| `scripts/nightshift.sh` | the unattended night loop, including the escalation ladder. Prefer `bash scripts/foreman.sh launch` so the night runs sealed. |
+| `scripts/foreman.sh` | the one entry point to the foreman: resolves a Python that can import yaml, pins PYTHONPATH, refuses loudly when none exists. |
+| `scripts/inspect.sh` | the inspector: suite ×2, held-out suite, tamper audit, scope ledger, SHA-bound verdict — with the judge chosen against the families that actually authored the work. |
 | `scripts/runner.sh` `triage.sh` | the Small Loop. |
-| `scripts/tests/` | tests for the loop semantics and the held-out seal. |
+| `scripts/ci-scope.sh` | the PR scope + seal check. CI calls this and `selftest.sh` exercises it, so the test cannot validate a transcription of the workflow. |
+| `scripts/lib/toolchain.sh` | the toolchain resolver: `HELDOUT_DIR`, `VISIBLE_CMD`, `HELDOUT_CMD`, `sparse_args`, `create_sealed_tree`, `seal_intact`. |
+| `scripts/lib/verify.sh` | one receipt parser (`fail_count`, `swift_fail_count`, `verify_ok`) shared by the loop and fix-round. |
+| `scripts/lib/merge.sh` | the launcher's no-clobber install policy, shared by all three platforms. |
+| `scripts/tests/` | behavioural suites: seal, toolchain, Swift cycle, ladder, prompts, launcher merge, workflow, loop semantics, foreman launch, bootstrap→HEAD. |
 
 ## Deviations from FACTORY-BUILD.md
 
@@ -484,22 +655,37 @@ exist. The scope failure was real: the PR had quietly picked up a change to
 
 **Setting it up on a new repo:**
 
+Ask the project where its held-out suite is; do not type the path.
+
 ```bash
-tar czf - -C factory/tests/heldout . | base64 > heldout.b64
+HD="$(bash scripts/toolchain.sh get HELDOUT_DIR)"     # factory/tests/heldout, Tests/HeldoutTests, …
+tar czf - -C "$HD" . | base64 > heldout.b64
 gh secret set HELDOUT_TESTS --repo <owner>/<repo> < heldout.b64
-git rm -r --cached factory/tests/heldout    # the builder must not be able to read them
-echo 'factory/tests/heldout/' >> .gitignore
+git rm -r --cached "$HD"                              # the builder must not be able to read them
+echo "$HD/" >> .gitignore
 ```
+
+Tarballing the wrong directory is the same failure as sealing the wrong one: the
+CI job reports `held-out checks unpacked: 0` and passes, and nothing downstream
+knows the difference between an exam that ran and an exam that never existed.
 
 Pushing a workflow file needs a token with the `workflow` scope — `gh auth
 status` will show whether yours has it.
 
 ## Known gaps
 
-- **The night shift's held-out seal is prompt-level at Phase B**, as the spec
-  intends ("At B: directory never referenced in worker prompts"). The files are
-  on disk in the main checkout; only `runner.sh` worktrees seal them physically.
-  Phase C seals the night shift too, by sparse-checkout mount.
+- **The seal is detection, not containment.** `git sparse-checkout disable`
+  inside a linked worktree brings the held-out files back, because the objects
+  are shared. What the factory now guarantees is that this cannot happen
+  silently: the commit is refused, the task parks, `log.md` says `seal_broken`,
+  and the night halts. Full containment needs a second clone without the objects
+  or a container, and that is deliberately not built (see *Not built, on
+  purpose*).
+- **`nightshift.sh` run directly is still unsealed.** It now says so, loudly, on
+  stderr and in the diary, rather than implying the seal was on — but the
+  conductor skill is what routes you to `foreman.sh launch`. If no interpreter
+  can import PyYAML, `foreman.sh` refuses and prints the commands to seal the
+  tree yourself; do that rather than starting a night unsealed.
 - **The CI judge needs an API key.** `ANTHROPIC_API_KEY` is unset in the proof
   repo, so the review job posts "mechanical gates GREEN … judge review skipped"
   rather than a verdict. That degradation is deliberate — it never claims SHIP
@@ -521,4 +707,3 @@ that is the only scheduled manual chore this system has.
 
 `CONTRACT.md` is immutable once signed. A contract that turned out wrong gets a
 new contract and a new signature, never a quiet edit.
-

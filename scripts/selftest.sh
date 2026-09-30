@@ -13,7 +13,14 @@ cd "$FACTORY_ROOT" || exit 1
 OFFLINE=0
 [ "${1:-}" = "--offline" ] && OFFLINE=1
 
-PASS=0; FAIL=0
+# One interpreter for every python check here, exported as $PYTHON so the
+# fixtures skip or run on the SAME thing (a fixture that probes a different
+# python than the suite reports on will disagree about whether PyYAML exists).
+PY="${PYTHON:-python3}"
+command -v "$PY" >/dev/null 2>&1 || PY=python3
+export PYTHON="$PY"
+
+PASS=0; FAIL=0; SKIP=0
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$1"; PASS=$((PASS+1)); }
 bad()  { printf '  \033[31m✗\033[0m %s\n' "$1"; FAIL=$((FAIL+1)); }
 head_() { printf '\n\033[1m%s\033[0m\n' "$1"; }
@@ -30,6 +37,7 @@ if command -v shellcheck >/dev/null 2>&1; then
   done
 else
   printf '  \033[33m–\033[0m shellcheck not installed (optional; see README deviations)\n'
+  SKIP=$((SKIP + 1))
 fi
 
 # --- 1b. entry points guard the leading-dash trap ---------------------------
@@ -38,19 +46,33 @@ head_ "1b. Entry-point prompt guards"
 # starts with '---'. A CLI in argument mode reads that as a flag and exits
 # before the model sees anything. run_role guards it; scripts that call a CLI
 # directly must guard it too, and this is the third time it has bitten.
+# Assert on the BYTES the CLI would receive, via --print. The old check grepped
+# each script for the literal guard line: that passes when the guard exists but is
+# unreachable, passes when the string only appears in a comment, and fails when
+# someone writes an equivalent guard a different way. --print runs the real
+# assembly, so it can only pass if the guard actually fired.
 for f in scripts/start.sh scripts/interview.sh; do
   [ -e "$f" ] || continue
-  if grep -q 'case "$PROMPT" in -\*)' "$f"; then
-    ok "$f guards a dash-leading prompt"
+  if ! bash "$f" --print >/dev/null 2>&1; then
+    bad "$f --print failed — cannot inspect the prompt it assembles"
+    continue
+  fi
+  nbytes="$(bash "$f" --print 2>/dev/null | wc -c | tr -d ' ')"
+  first="$(bash "$f" --print 2>/dev/null | head -c 1)"
+  if [ "$first" = "-" ]; then
+    bad "$f emits a prompt starting with a dash — an arg-mode CLI reads it as a flag and exits before the model sees anything"
+  elif [ "${nbytes:-0}" -lt 200 ]; then
+    bad "$f --print emitted only $nbytes bytes — a short prompt makes the dash check vacuous"
   else
-    bad "$f passes a prompt to a CLI without the leading-dash guard"
+    ok "$f's assembled prompt is $nbytes bytes and does not begin with a dash"
   fi
 done
-# and the guard must actually work on the real assembled prompt
-if [ -x scripts/start.sh ] || [ -f scripts/start.sh ]; then
-  first="$(bash scripts/start.sh --print 2>/dev/null | head -c 1)"
-  [ "$first" != "-" ] && ok "start.sh --print does not begin with a dash" \
-    || bad "start.sh still emits a prompt beginning with a dash"
+# The skill files really do open with '---', which is what makes the guard load-
+# bearing. If that stops being true the check above proves nothing, so pin it.
+if [ "$(head -c 3 skills/conductor/SKILL.md)" = "---" ]; then
+  ok "skill files still open with YAML frontmatter (the reason the guard exists)"
+else
+  bad "skills/conductor/SKILL.md no longer starts with '---' — re-check the dash guard"
 fi
 
 # --- 2. JSON schemas -------------------------------------------------------
@@ -103,147 +125,163 @@ assert_cross_family judge planner 2>/dev/null \
   && bad "same-family pair was NOT flagged" \
   || ok "same-family pair correctly flagged"
 
-# --- 5. held-out seal ------------------------------------------------------
-head_ "5. Held-out seal"
-# Only EXECUTOR-facing skills are constrained. exam-board authors the held-out
-# suite and inspector runs it — both must name it. The seal is about what the
-# builder can reach, not about the word appearing in the repo.
-EXECUTOR_SKILLS="skills/night-task/SKILL.md"
-seal_leak=0
-for f in $EXECUTOR_SKILLS; do
-  while IFS= read -r line; do
-    printf '%s' "$line" | grep -qE "does not exist|do not|never|NEVER|not there" || seal_leak=1
-  done < <(grep -n "tests/heldout" "$f" 2>/dev/null)
-done
-[ "$seal_leak" = "0" ] && ok "executor-facing skills mention heldout/ only to forbid it" \
-  || bad "an executor-facing skill references heldout/ as usable"
-# Stronger check: the prompt builders must never read held-out content into a
-# worker prompt. This is the leak that would actually matter.
-if grep -nE "(cat|sed|head|tail|<).*tests/heldout" scripts/nightshift.sh scripts/runner.sh 2>/dev/null | grep -q .; then
-  bad "a worker prompt builder reads from tests/heldout/"
-else
-  ok "no worker prompt builder reads tests/heldout/"
-fi
-grep -q "sparse-checkout" scripts/runner.sh && ok "runner.sh excludes heldout/ by sparse checkout" \
-  || bad "runner.sh does not seal heldout/"
-grep -q "HELDOUT_TESTS" .github/workflows/factory.yml && ok "CI fetches held-out suite from secrets" \
-  || bad "CI has no held-out fetch"
-# The physical proof: build a worker worktree and assert heldout/ is not there.
-if SEAL_OUT="$(bash scripts/tests/test-seal.sh 2>&1)"; then
-  printf '%s\n' "$SEAL_OUT" | grep "✓" | sed 's/^/  /'
-  while IFS= read -r l; do case "$l" in *"✓"*) PASS=$((PASS+1));; esac; done <<< "$SEAL_OUT"
-else
-  printf '%s\n' "$SEAL_OUT" | sed 's/^/  /'; bad "seal tests failed"
-fi
-
-# --- 5b. compiled-toolchain support ----------------------------------------
-head_ "5b. Compiled toolchains (Swift)"
-# The toolchain profile is what lets a project declare how it is built instead
-# of the factory assuming Python. It has to load in a plain shell.
-if [ -f docs/toolchains/swift.env ]; then
-  if TC_OUT="$(bash -c '. docs/toolchains/swift.env; printf "%s|%s" "$VISIBLE_CMD" "$FACTORY_ROLE_TIMEOUT"' 2>&1)"; then
-    case "$TC_OUT" in
-      *"swift test"*"|"*[0-9]) ok "swift toolchain profile sources cleanly ($TC_OUT)" ;;
-      *) bad "swift profile loaded but looks wrong: $TC_OUT" ;;
-    esac
-  else
-    bad "swift toolchain profile does not source: $TC_OUT"
+# run_fixture <script> <label> : execute a behavioural suite and fold its own
+# ✓/– lines into this run's tally.
+#
+# Skips are COUNTED and SHOWN. A suite that silently no-ops (no Swift toolchain,
+# no PyYAML) must not roll up into "all N checks passed" — that is precisely how
+# the Swift gap shipped: every check that could have caught it either grepped a
+# string or quietly did not run.
+run_fixture() {
+  local script="$1" label="$2" out rc n
+  if [ ! -f "scripts/tests/$script" ]; then
+    bad "$label: scripts/tests/$script is missing"
+    return 1
   fi
-else
-  bad "docs/toolchains/swift.env is missing"
-fi
-# The seal has to survive a compiled build: a test target named unconditionally
-# in Package.swift breaks the build the moment the directory is sealed away, and
-# then every task parks. The exam board is where that gets decided.
-grep -q "FileManager" skills/exam-board/SKILL.md \
-  && ok "exam board declares the held-out target conditionally" \
-  || bad "exam board does not explain how the seal survives a Swift build"
-grep -q "filePath" skills/exam-board/SKILL.md \
-  && ok "exam board anchors the seal check to #filePath, not a relative path" \
-  || bad "exam board uses a relative path for the seal check (resolves elsewhere)"
-grep -q "manifest-cache none" skills/exam-board/SKILL.md \
-  && ok "held-out run disables the manifest cache" \
-  || bad "held-out run can reuse a manifest evaluated in the other seal state"
-grep -q "XCTest" skills/exam-board/SKILL.md \
-  && ok "exam board specifies XCTest for Swift projects" || bad "no XCTest guidance"
-# Per-task verification: the gate is the task's own slice, not the whole suite.
-grep -q "^Verify:" skills/blueprint/SKILL.md \
-  && ok "blueprint emits a per-task Verify: line" || bad "blueprint does not emit Verify:"
-grep -q "toolchain.env" skills/work-order/SKILL.md \
-  && ok "work order writes the verification gate to toolchain.env" \
-  || bad "work order does not declare the toolchain"
-grep -q "toolchain.env" scripts/lib/status.sh \
-  && ok "stations load the project's toolchain profile" \
-  || bad "toolchain.env is never sourced"
-
-# --- 6. CI workflow --------------------------------------------------------
-head_ "6. CI workflow"
-if python3 - <<'PY' 2>/dev/null
-import yaml, sys
-d = yaml.safe_load(open('.github/workflows/factory.yml'))
-j = d['jobs']
-assert set(j) == {'build','visible','heldout','scope','review'}, f"job set: {sorted(j)}"
-assert j['review']['needs'] == ['visible','heldout','scope'], "review must gate on all three"
-PY
-then ok "factory.yml parses; job graph correct"; else bad "factory.yml invalid or job graph wrong"; fi
-
-# Every run: block must be valid shell. A YAML block scalar silently swallows
-# under-indented lines, which is how a broken script reaches CI looking fine.
-if python3 - <<'PY' 2>/dev/null
-import yaml, subprocess, tempfile, os, sys
-d = yaml.safe_load(open('.github/workflows/factory.yml'))
-bad = []
-for jn, j in d['jobs'].items():
-    for i, s in enumerate(j['steps']):
-        if 'run' not in s: continue
-        src = s['run'].replace('${{', '$OPEN').replace('}}', '')
-        with tempfile.NamedTemporaryFile('w', suffix='.sh', delete=False) as f:
-            f.write(src); p = f.name
-        r = subprocess.run(['bash', '-n', p], capture_output=True, text=True)
-        if r.returncode: bad.append(f"{jn}.step[{i}]")
-        os.unlink(p)
-sys.exit(1 if bad else 0)
-PY
-then ok "every CI run-block parses as bash"; else bad "a CI run-block is not valid shell"; fi
-
-# The scope check must reject a diff that strays outside the declared manifest.
-_scope() {
-  printf '%s\n' "$2" | sort -u > "$T1"
-  printf '%s\n' "$1" | sed -n '/Files changed:/,/^$/p' | sed -n 's/^[[:space:]]*-[[:space:]]*//p' | sort -u > "$T2"
-  [ -s "$T2" ] || return 1
-  comm -23 "$T1" "$T2" | grep -q . && return 1
-  printf '%s\n' "$1" | grep -q "Other behavior changes:" || return 1
+  out="$(bash "scripts/tests/$script" 2>&1)"; rc=$?
+  # surface the suite's own skip notices, then count them
+  n="$(printf '%s\n' "$out" | grep -c '–' 2>/dev/null)"; n="${n:-0}"
+  if [ "$n" -gt 0 ]; then
+    printf '%s\n' "$out" | grep '–' | sed 's/^/  /'
+    SKIP=$((SKIP + n))
+  fi
+  printf '%s\n' "$out" | grep '✓' | sed 's/^/  /'
+  while IFS= read -r l; do case "$l" in *"✓"*) PASS=$((PASS+1));; esac; done <<< "$out"
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$out" | grep -v '✓' | grep -v '–' | sed 's/^/  /'
+    bad "$label"
+    return 1
+  fi
   return 0
 }
-T1="$(mktemp)"; T2="$(mktemp)"
-BODY_OK='Files changed:
-- src/a.py
-- tests/test_a.py
 
-Other behavior changes: None'
-_scope "$BODY_OK" "src/a.py
-tests/test_a.py" && ok "scope check accepts an in-manifest diff" || bad "scope check rejects a clean diff"
-_scope "$BODY_OK" "src/a.py
-src/sneaky.py" && bad "scope check accepted an out-of-manifest file" || ok "scope check rejects an undeclared file"
-_scope "no manifest here" "src/a.py" && bad "scope check accepted a body with no manifest" || ok "scope check rejects a missing manifest"
-_scope 'Files changed:
-- src/a.py' "src/a.py" && bad "scope check accepted a missing ledger line" || ok "scope check rejects a missing ledger line"
-rm -f "$T1" "$T2"
+
+# --- 5. held-out seal: behaviour, not text ---------------------------------
+head_ "5. Held-out seal — behavioural"
+# These checks used to be greps over source files. One of them,
+# `grep -q "sparse-checkout" scripts/runner.sh`, FAILED the moment runner.sh was
+# improved to call the shared create_sealed_tree — while the real seal test two
+# lines below passed. That is the whole argument for this section: a grep
+# measures how code is written, and it breaks in both directions when the code
+# gets better. Everything here runs something and asserts on what happened.
+run_fixture test-seal.sh "physical seal (create_sealed_tree)"
+run_fixture test-prompts.sh "worker/exam prompt hygiene"
+
+# What a grep still legitimately does: check that a PROMPT-FACING document does
+# not instruct the builder to use the held-out suite. That is a property of the
+# text, so reading the text is the right instrument — but it is scoped to the
+# executor-facing skills, and it is never the seal.
+for f in skills/night-task/SKILL.md; do
+  if grep -n "heldout\|held-out" "$f" 2>/dev/null \
+     | grep -vqE "does not exist|do not|never|NEVER|not there|HELDOUT_DIR|is not in your|absent"; then
+    bad "$f mentions the held-out suite in non-prohibiting terms"
+  else
+    ok "$f references the held-out suite only to forbid it"
+  fi
+done
+
+# --- 5b. compiled toolchains: BEHAVIOUR, not text --------------------------
+head_ "5b. Compiled toolchains (Swift) — behavioural"
+# Every check in this section used to be `grep -q` for a string in a file:
+# "toolchain.env", "manifest-cache none", "FileManager". All of them passed while
+# HELDOUT_CMD was read by nothing and the seal removed a directory a Swift
+# project does not use. A string in a file proves someone wrote the intent down;
+# it says nothing about whether the mechanism works. These run fixtures instead.
+run_fixture test-toolchain.sh "toolchain resolution and sealing"
+run_fixture test-swift-cycle.sh "swift sealed exam-and-verify cycle"
+run_fixture test-ladder.sh "escalation ladder and judge independence"
+run_fixture test-foreman-launch.sh "foreman launch physical seal"
+run_fixture test-launcher.sh "launcher no-clobber merge"
+run_fixture test-fixround.sh "fix round on a compiled project"
+# bootstrap -> HEAD -> sealed worktree, end to end. The commit gate is the step
+# that makes the whole sealed design reachable: launch builds its sandbox from
+# HEAD, so a plan that was only ever written to the working directory does not
+# exist for the night. Nothing else in this suite covers that handoff, which is
+# why the failure presented as "STATUS: DONE, 0 commits" instead of an error.
+run_fixture test-bootstrap.sh "bootstrap artifacts reach HEAD and a sealed night"
+
+# --- 6. CI workflow --------------------------------------------------------
+# Parsed structurally in scripts/tests/test-workflow.sh, which skips LOUDLY when
+# PyYAML is missing. Reporting "factory.yml invalid" because a dependency is
+# absent is how red output stops meaning anything — and it hides the real
+# failures, which is exactly how the Swift gap shipped.
+run_fixture test-workflow.sh "CI workflow structure and toolchain wiring"
+
+# The scope + seal check: run THE SCRIPT CI RUNS. This used to re-implement the
+# workflow's inline logic in a local `_scope()` function, so it validated a
+# transcription — a change to the YAML could not possibly break it.
+head_ "6b. Scope + seal check (scripts/ci-scope.sh)"
+SCOPE_DIR="$(mktemp -d)"
+# A throwaway project so HELDOUT_DIR resolves to something known, and so the
+# Swift case can be exercised against a declared non-default path.
+SP="$SCOPE_DIR/proj"; mkdir -p "$SP/scripts/lib" "$SP/factory/tests/heldout"
+cp scripts/ci-scope.sh "$SP/scripts/"; cp scripts/lib/*.sh "$SP/scripts/lib/"
+cp models.env "$SP/"
+BODY_OK="$SCOPE_DIR/body-ok.txt"
+printf 'Files changed:\n- src/a.py\n- tests/test_a.py\n\nOther behavior changes: None\n' > "$BODY_OK"
+BODY_NOMAN="$SCOPE_DIR/body-none.txt"; printf 'nothing here\n' > "$BODY_NOMAN"
+BODY_NOLEDGER="$SCOPE_DIR/body-noledger.txt"
+printf 'Files changed:\n- src/a.py\n\n' > "$BODY_NOLEDGER"
+
+scope_case() { # scope_case <label> <expect pass|fail> <changed-lines...> -- uses $BODY_VAR
+  local label="$1" expect="$2"; shift 2
+  local cf="$SCOPE_DIR/changed.$$.txt"
+  printf '%s\n' "$@" > "$cf"
+  local out rc
+  out="$( cd "$SP" && FACTORY_ROOT="$SP" bash scripts/ci-scope.sh check "$cf" "$BODY_VAR" 2>&1 )"; rc=$?
+  case "$expect" in
+    pass) [ "$rc" = "0" ] && ok "$label" || bad "$label (rc=$rc: $(printf '%s' "$out" | head -1))" ;;
+    fail) [ "$rc" != "0" ] && ok "$label" || bad "$label — ACCEPTED what it must reject" ;;
+  esac
+}
+BODY_VAR="$BODY_OK"
+scope_case "accepts an in-manifest diff"        pass "src/a.py" "tests/test_a.py"
+scope_case "rejects an undeclared file"         fail "src/a.py" "src/sneaky.py"
+scope_case "rejects a PR that touches heldout/" fail "src/a.py" "factory/tests/heldout/test_x.py"
+BODY_VAR="$BODY_NOMAN"
+scope_case "rejects a body with no manifest"    fail "src/a.py"
+BODY_VAR="$BODY_NOLEDGER"
+scope_case "rejects a missing ledger line"      fail "src/a.py"
+
+# The declared-path case: a Swift project's exam lives at Tests/HeldoutTests, so
+# a check hard-wired to the default path prints "seal OK" while the PR smuggles
+# the exam in. Real files, not process substitution: <( ... ) yields /dev/fd/N,
+# which is not a regular file, so the script's own existence check rejects it and
+# the test would exercise the wrong branch and look like a product bug.
+printf "HELDOUT_DIR='Tests/HeldoutTests'\n" > "$SP/factory/toolchain.env"
+printf 'src/a.py\nTests/HeldoutTests/Leak.swift\n' > "$SCOPE_DIR/changed-leak.txt"
+printf 'src/a.py\nfactory/tests/heldout/old.py\n'  > "$SCOPE_DIR/changed-stale.txt"
+out="$( cd "$SP" && FACTORY_ROOT="$SP" bash scripts/ci-scope.sh check \
+         "$SCOPE_DIR/changed-leak.txt" "$BODY_OK" 2>&1 )"
+printf '%s' "$out" | grep -q "Tests/HeldoutTests" \
+  && ok "seal check uses the DECLARED dir (rejects Tests/HeldoutTests in a PR)" \
+  || bad "seal check ignored the declared HELDOUT_DIR: $(printf '%s' "$out" | head -2 | tr '\n' '|')"
+out2="$( cd "$SP" && FACTORY_ROOT="$SP" bash scripts/ci-scope.sh check \
+          "$SCOPE_DIR/changed-stale.txt" "$BODY_OK" 2>&1 )"
+# Declare both files in the body so the ONLY question left is whether the seal
+# check fires: otherwise the scope rule rejects the undeclared path first and the
+# assertion tests the wrong gate.
+BODY_SWIFT="$SCOPE_DIR/body-swift.txt"
+printf 'Files changed:\n- src/a.py\n- factory/tests/heldout/old.py\n\nOther behavior changes: None\n' \
+  > "$BODY_SWIFT"
+out2="$( cd "$SP" && FACTORY_ROOT="$SP" bash scripts/ci-scope.sh check \
+          "$SCOPE_DIR/changed-stale.txt" "$BODY_SWIFT" 2>&1 )"
+printf '%s' "$out2" | grep -q "seal OK" \
+  && ok "a stale default-path heldout/ no longer trips the Swift project's seal check" \
+  || bad "unexpected: $(printf '%s' "$out2" | head -2 | tr '\n' '|')"
+rm -rf "$SCOPE_DIR"
 
 # --- 7. night-shift loop semantics (stubbed executor, no model calls) ------
 head_ "7. Night-shift loop semantics"
-if NS_OUT="$(bash scripts/tests/test-nightshift.sh 2>&1)"; then
-  while IFS= read -r l; do case "$l" in *"✓"*) PASS=$((PASS+1));; esac; done <<< "$NS_OUT"
-  printf '%s\n' "$NS_OUT" | grep "✓" | sed 's/^/  /'
-else
-  printf '%s\n' "$NS_OUT" | sed 's/^/  /'
-  bad "night-shift loop tests failed"
-fi
-
+run_fixture test-nightshift.sh "night-shift loop semantics"
 # --- 8. foreman (Phase C) --------------------------------------------------
 if [ -d foreman ]; then
   head_ "8. Foreman (Phase C)"
-  if FO="$(python3 -m unittest foreman.tests.test_foreman 2>&1)"; then
+  if ! "$PY" -c 'import yaml' 2>/dev/null; then
+    printf '  \033[33m–\033[0m %s has no PyYAML — foreman suite and CLI UNVERIFIED\n' "$PY"
+    printf '  \033[33m–\033[0m install pyyaml (or run: PYTHON=/path/to/venv/bin/python bash scripts/selftest.sh)\n'
+  SKIP=$((SKIP + 1))
+  elif FO="$("$PY" -m unittest foreman.tests.test_foreman 2>&1)"; then
     n="$(printf '%s' "$FO" | grep -oE 'Ran [0-9]+ tests' | grep -oE '[0-9]+')"
     ok "foreman unit suite: ${n:-?} tests pass"
     PASS=$((PASS + ${n:-0} - 1))
@@ -251,15 +289,18 @@ if [ -d foreman ]; then
     printf '%s\n' "$FO" | tail -20 | sed 's/^/  /'
     bad "foreman unit suite failed"
   fi
-  if python3 -m foreman --root . status >/dev/null 2>&1; then
-    ok "foreman CLI runs against this repo"
-  else bad "foreman CLI failed"; fi
+  if "$PY" -c 'import yaml' 2>/dev/null; then
+    if "$PY" -m foreman --root . status >/dev/null 2>&1; then
+      ok "foreman CLI runs against this repo"
+    else bad "foreman CLI failed"; fi
+  fi
 fi
 
 # --- 9. headless adapters --------------------------------------------------
 head_ "9. Headless adapter smoke tests"
 if [ "$OFFLINE" = "1" ]; then
   printf '  \033[33m–\033[0m skipped (--offline)\n'
+  SKIP=$((SKIP + 1))
 else
   PROBE='Reply with ONLY this exact block and nothing else:
 ---FACTORY_STATUS---
@@ -277,6 +318,7 @@ SUMMARY: adapter reachable
     elif [ "$role" = "fallback" ]; then
       printf '  \033[33m–\033[0m %s (%s) UNAVAILABLE — escalation rung only: %s\n' \
         "$role" "$(role_family "$role")" "$(head -c 90 "$E" | tr '\n' ' ')"
+      SKIP=$((SKIP + 1))
     else
       bad "$role ($(role_family "$role")) failed: $(head -c 120 "$O" | tr '\n' ' ')"
     fi
@@ -299,9 +341,25 @@ $PROBE" > "$O" 2>/dev/null && status_valid "$O" 2>/dev/null; then
 fi
 
 # --- summary ---------------------------------------------------------------
-printf '\n\033[1m%d passed, %d failed\033[0m\n' "$PASS" "$FAIL"
+printf '\n\033[1m%d passed, %d failed\033[0m' "$PASS" "$FAIL"
+if [ "$SKIP" -gt 0 ]; then
+  # A skip is not a pass. If the Swift cycle or the workflow check did not run,
+  # the number above does not describe the system you are about to trust.
+  printf ' \033[33m(%d skipped)\033[0m' "$SKIP"
+fi
+printf '\n'
 if [ "$FAIL" -gt 0 ]; then
   status_emit "selftest" "-" "BLOCKED" "$FAIL check(s) failed"
   exit 1
 fi
-status_emit "selftest" "-" "DONE" "all $PASS checks passed"
+# The status block must not claim more than the run proved. "all N checks
+# passed" while the Swift cycle skipped is the same category of overclaim this
+# pass is fixing: a downstream reader (the conductor, the foreman, a human
+# skimming factory/log.md) sees DONE and stops looking.
+if [ "$SKIP" -gt 0 ]; then
+  status_emit "selftest" "-" "DONE" \
+    "$PASS passed, $SKIP SKIPPED - the skipped checks proved nothing" \
+    "SKIPPED: $SKIP"
+else
+  status_emit "selftest" "-" "DONE" "all $PASS checks passed"
+fi
