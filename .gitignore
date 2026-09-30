@@ -2,3 +2,8 @@ __pycache__/
 .DS_Store
 .venv/
 *.pyc
+# The sealed night runs in a nested git worktree. Untracked and visible, the
+# loop's salvage path records it as a mode-160000 gitlink.
+.foreman-sandbox/
+# oh-my-pi's local state for a project.
+.omp/

@@ -90,7 +90,7 @@ if ($isProject) {
     if (-not $PSBoundParameters.ContainsKey('Dir')) {
         Add-Type -AssemblyName System.Windows.Forms | Out-Null
         $answer = [System.Windows.Forms.MessageBox]::Show(
-            "Set up a new Software Bodega project in:`n`n$Dir`n`n($count existing item(s) — nothing will be deleted.)",
+            "Set up a new Software Bodega project in:`n`n$Dir`n`n($count existing item(s) — nothing will be overwritten.)",
             "Software Bodega",
             [System.Windows.Forms.MessageBoxButtons]::OKCancel,
             [System.Windows.Forms.MessageBoxIcon]::Question)
@@ -102,24 +102,32 @@ if ($isProject) {
 # --- 3. initialise from the template (never destructive) -------------------
 if ($Mode -eq "init") {
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-    # Loud, not silent: a swallowed copy error leaves a project with no
-    # scripts/ that only fails later with "No such file or directory".
-    $failed = @()
-    foreach ($item in @("skills", "scripts", "foreman", "docs", "models.env", "AGENTS.md", "README.md", ".github")) {
-        $src = Join-Path $Template $item
-        if (-not (Test-Path $src)) { $failed += "$item(missing-in-template)"; continue }
-        try { Copy-Item -Recurse -Force $src -Destination $Dir -ErrorAction Stop }
-        catch { $failed += $item }
-    }
-    if ($failed.Count) { Die "Could not copy into ${Dir}:`n$($failed -join ', ')" }
-    foreach ($must in @("scripts\start.sh", "scripts\nightshift.sh", "skills\conductor\SKILL.md", "models.env")) {
-        if (-not (Test-Path (Join-Path $Dir $must))) { Die "Setup incomplete: $Dir\$must is missing after copy." }
+    # Never destructive, and now provably so. `Copy-Item -Recurse -Force` was the
+    # original: -Force means an existing README.md, AGENTS.md, .github\*.yml or
+    # same-named scripts\*.sh was silently REPLACED by Bodega's copy, while the
+    # dialog said "nothing will be overwritten".
+    #
+    # The policy lives in scripts/lib/merge.sh (scan first; refuse and write
+    # nothing when Bodega machinery would be replaced; install docs and workflows
+    # under distinct names otherwise; verify by bytes afterwards). Calling it
+    # through the bash this script already requires keeps one policy for all
+    # three platforms instead of a PowerShell copy that can drift from it.
+    $fwdTemplate = ($Template -replace '\\', '/')
+    $fwdDir      = ($Dir      -replace '\\', '/')
+    $mergeOut = & $Bash -lc "bash '$fwdTemplate/scripts/lib/merge.sh' '$fwdTemplate' '$fwdDir' 2>&1"
+    $mergeRc = $LASTEXITCODE
+    $mergeOut | ForEach-Object { Write-Host $_ }
+    if ($mergeRc -ne 0) {
+        Die "Software Bodega cannot set up here without overwriting your files.`nNothing was written. See the list above, move those paths aside, and run this again."
     }
 
-    foreach ($d in @("factory\.planning\gate-results", "factory\tasks",
-                     "factory\tests\visible", "factory\tests\heldout", "factory\adr")) {
+    foreach ($d in @("factory\.planning\gate-results", "factory\tasks", "factory\adr")) {
         New-Item -ItemType Directory -Force -Path (Join-Path $Dir $d) | Out-Null
     }
+    # The suite directories are NOT pre-created: which ones exist is decided by
+    # scripts/toolchain.sh resolve (before the exam board) from the project's
+    # declared toolchain. Creating factory\tests\heldout here in a Swift project
+    # leaves an empty directory that makes the seal test pass vacuously.
     # LF endings throughout: these files are read by bash and by the stations.
     function Write-Lf($path, $text) {
         [System.IO.File]::WriteAllText($path, ($text -replace "`r`n", "`n"), (New-Object System.Text.UTF8Encoding $false))

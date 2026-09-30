@@ -69,7 +69,7 @@ try
 
 $DIR
 
-($COUNT existing item(s) — nothing will be deleted.)" buttons {"Cancel", "Set up"} default button "Set up" with title "Software Bodega")
+($COUNT existing item(s) — nothing will be overwritten.)" buttons {"Cancel", "Set up"} default button "Set up" with title "Software Bodega")
   return r
 on error
   return "Cancel"
@@ -86,17 +86,27 @@ if [ "$MODE" = "init" ]; then
   mkdir -p "$DIR" || die "Cannot create $DIR"
   # Loud, not silent: a swallowed cp error once left a project with no
   # scripts/ and only surfaced later as "No such file or directory".
-  COPY_FAIL=""
-  for item in skills scripts foreman docs models.env AGENTS.md README.md .github; do
-    [ -e "$TEMPLATE/$item" ] || { COPY_FAIL="$COPY_FAIL $item(missing-in-template)"; continue; }
-    cp -R "$TEMPLATE/$item" "$DIR/" || COPY_FAIL="$COPY_FAIL $item"
-  done
-  [ -n "$COPY_FAIL" ] && die "Could not copy into $DIR:$COPY_FAIL"
-  for must in scripts/start.sh scripts/nightshift.sh skills/conductor/SKILL.md models.env; do
-    [ -e "$DIR/$must" ] || die "Setup incomplete: $DIR/$must is missing after copy."
-  done
-  mkdir -p "$DIR/factory/.planning/gate-results" "$DIR/factory/tasks" \
-           "$DIR/factory/tests/visible" "$DIR/factory/tests/heldout" "$DIR/factory/adr"
+  # Never destructive, and now provably so. `cp -R` used to overwrite any
+  # same-named file the human already had — README.md, AGENTS.md, anything under
+  # .github/, and any scripts/*.sh with a matching name — while the dialog above
+  # said "nothing will be deleted". scripts/lib/merge.sh scans first, refuses
+  # (writing nothing) when Bodega machinery would be replaced, installs docs and
+  # workflows under distinct names otherwise, and verifies the result by bytes.
+  # shellcheck disable=SC1091
+  . "$TEMPLATE/scripts/lib/merge.sh"
+  # The full conflict list goes to the terminal; the alert gets one line because
+  # a newline inside an AppleScript string literal is a syntax error, and a
+  # silently-failing alert would hide the refusal entirely.
+  if ! bodega_merge "$TEMPLATE" "$DIR"; then
+    printf '%s\n' "$(bodega_merge_conflict_message)" >&2
+    die "Cannot set up here without overwriting your files. Nothing was written — see the terminal for which paths conflict."
+  fi
+  bodega_merge_report
+  # The suite directories are NOT created here. Which ones exist is a property of
+  # the project's toolchain, decided by `scripts/toolchain.sh resolve` before the
+  # exam board; pre-creating factory/tests/heldout in a Swift project leaves an
+  # empty directory that makes the seal test pass vacuously.
+  mkdir -p "$DIR/factory/.planning/gate-results" "$DIR/factory/tasks" "$DIR/factory/adr"
   printf 'STAGE: INTERVIEW\nPOINTER: new project — run the interview\n' > "$DIR/factory/STATE.md"
   printf '# progress.md — append-only. Format: TASK|status|SHA|tests|note\n' > "$DIR/factory/progress.md"
   printf '# log.md — append-only station diary. Format: ISO8601|station|event|detail\n' > "$DIR/factory/log.md"
