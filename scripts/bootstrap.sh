@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bootstrap.sh — drive the bootstrap pipeline's non-interactive stations.
 #
-#   SPEC -> BLUEPRINT -> EXAM BOARD -> WORK ORDER (+ cross-family plan review)
+#   SPEC -> BLUEPRINT -> TOOLCHAIN -> EXAM BOARD -> WORK ORDER (+ plan review)
 #
 # Each station is a FRESH headless session (hard rule 1: one agent per station,
 # one task per context window). Gates run between stations and stop the line on
@@ -9,6 +9,12 @@
 #
 # The INTERVIEW is normally interactive; --answers replays scripted answers so
 # the whole pipeline can be exercised unattended (used by the dry run).
+#
+# TOOLCHAIN runs BEFORE the exam board on purpose. The exam board has to be told
+# where the held-out suite will live, and in a compiled project that is a
+# build-manifest fact, not a directory the factory can name afterwards. Writing
+# toolchain.env at the work order — after the exam — is how Swift projects ended
+# up with a seal that removed a directory they do not use.
 #
 # Usage:
 #   bash scripts/bootstrap.sh --idea "<one line>" --answers <file>   # from scratch
@@ -26,7 +32,7 @@ while [ $# -gt 0 ]; do
     --idea)    IDEA="$2"; shift ;;
     --answers) ANSWERS="$2"; shift ;;
     --from)    FROM="$2"; shift ;;
-    --help|-h) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --help|-h) sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
   shift
@@ -55,6 +61,38 @@ die() {
   exit 1
 }
 
+# commit_artifacts <reason> : land what this stage produced in HEAD.
+#
+# Not a convenience — the sealed night is built from HEAD. `foreman launch`
+# creates a sparse-checkout worktree of the current commit, so anything that
+# exists only in the main checkout's working directory does not exist for the
+# night at all. Measured: a project scaffolded, bootstrapped, and launched
+# exactly as the conductor skill describes produced a sandbox with no
+# factory/tasks/, the loop exited in one iteration, and the run reported
+# STATUS: DONE with 0 commits. The artifacts were real and invisible.
+#
+# Explicit path, never -A (hard rule 6): bootstrap writes under factory/ only,
+# and committing the human's unrelated working-tree changes here would sweep
+# them into the factory's history. The held-out suite rides along on purpose —
+# it is the only copy until the README's push step moves it into a secret, and
+# losing an exam is worse than the untracked-files tidy-up it skips.
+commit_artifacts() {
+  local reason="$1"
+  git rev-parse --git-dir >/dev/null 2>&1 || {
+    echo "[bootstrap] no git repo — artifacts not committed; the sealed night will not see them" >&2
+    return 0
+  }
+  git add -- factory/ 2>/dev/null || { echo "[bootstrap] git add factory/ failed" >&2; return 0; }
+  if git diff --cached --quiet -- factory/ 2>/dev/null; then return 0; fi
+  if git commit -q -m "factory: $reason" 2>/dev/null; then
+    echo "[bootstrap] committed $(git rev-parse --short HEAD) — $reason" >&2
+    log_append "bootstrap" "committed" "$reason @$(git rev-parse --short HEAD)"
+  else
+    echo "[bootstrap] WARNING: could not commit $reason — a sealed launch will not see these artifacts" >&2
+    log_append "bootstrap" "commit_failed" "$reason"
+  fi
+}
+
 run_station() { # run_station <name> <role> <prompt>
   local name="$1" role="$2" prompt="$3" out="$RUN/$1.out"
   echo "[bootstrap] === $name ($role) ===" >&2
@@ -69,7 +107,7 @@ run_station() { # run_station <name> <role> <prompt>
   fi
 }
 
-ORDER="interview spec blueprint exam workorder planreview"
+ORDER="interview spec blueprint toolchain exam workorder planreview"
 started=0
 
 for STAGE in $ORDER; do
@@ -171,39 +209,78 @@ PY
     echo "[bootstrap] ✓ decompose_gate ($NT task files)" >&2
     ;;
 
+  toolchain)
+    # Not a model station — a mechanical one. It writes factory/toolchain.env if
+    # the project has not declared one, then PROVES the declared commands can
+    # actually run. It sits before the exam board because the exam board has to
+    # be told where the held-out suite lives, and in a compiled project that path
+    # is fixed by the build manifest, not chosen afterwards.
+    echo "[bootstrap] === TOOLCHAIN (mechanical) ===" >&2
+    bash "$HERE/toolchain.sh" resolve || die "toolchain resolve failed"
+    bash "$HERE/toolchain.sh" check   || die "toolchain.env declares something that cannot run"
+    reload_toolchain
+    [ -n "$HELDOUT_DIR" ] || die "toolchain_gate: HELDOUT_DIR resolved empty"
+    echo "[bootstrap] ✓ toolchain_gate (heldout dir: $HELDOUT_DIR)" >&2
+    ;;
+
   exam)
-    # FRESH, SPEC-BLIND session: gets spec.json ONLY. No blueprint, no tasks,
-    # no code. That isolation is what makes the held-out half meaningful.
+    # FRESH, SPEC-BLIND session: gets spec.json + the resolved toolchain. No
+    # blueprint, no tasks, no code. That isolation is what makes the held-out
+    # half meaningful — but the toolchain is NOT a leak: it says which framework
+    # and which directory, not what the tests will assert.
     run_station "exam" planner "$(
       cat skills/exam-board/SKILL.md
-      printf '\n\n===== INPUT: factory/.planning/spec.json (your ONLY input) =====\n'
+      printf '\n\n===== INPUT: factory/.planning/spec.json (your ONLY spec input) =====\n'
       cat factory/.planning/spec.json
-      printf '\nWrite:\n'
+      printf '\n\n===== RESOLVED TOOLCHAIN (from scripts/toolchain.sh) =====\n'
+      printf 'HELDOUT_DIR=%s\n' "$HELDOUT_DIR"
+      printf 'VISIBLE_DIR=%s\n' "$VISIBLE_DIR"
+      printf 'VISIBLE_CMD=%s\n' "$VISIBLE_CMD"
+      printf 'HELDOUT_CMD=%s\n' "$HELDOUT_CMD"
+      printf 'BUILD_CMD=%s\n' "$BUILD_CMD"
+      printf '\nWrite the two suites INTO THOSE DIRECTORIES. The factory seals by\n'
+      printf 'HELDOUT_DIR: a held-out file written anywhere else is readable by the\n'
+      printf 'builder while every log claims the opposite. Do not assume Python and\n'
+      printf 'do not assume factory/tests/ — write what this toolchain names.\n'
       printf '  factory/CONTRACT.md\n'
-      printf '  factory/tests/visible/   (>=3 checks the builder may see)\n'
-      printf '  factory/tests/heldout/   (>=2 checks the builder must NEVER see)\n'
-      printf '  factory/tests/run-visible.sh  — runs ONLY tests/visible, exits 0/non-0\n'
-      printf '  factory/tests/run-heldout.sh  — runs ONLY tests/heldout, exits 0/non-0\n'
-      printf 'Both runners must work from the repo root and must not depend on any\n'
-      printf 'package being installed beyond the python3 standard library.\n'
+      printf '  %s   (>=3 checks the builder may see)\n' "$VISIBLE_DIR"
+      printf '  %s   (>=2 checks the builder must NEVER see)\n' "$HELDOUT_DIR"
+      printf '\nIf this is an interpreted project with runner scripts, also write:\n'
+      printf '  factory/tests/run-visible.sh  — runs ONLY the visible suite, exits 0/non-0\n'
+      printf '  factory/tests/run-heldout.sh  — runs ONLY the held-out suite, exits 0/non-0\n'
+      printf 'If it is a compiled project, the toolchain commands above are the\n'
+      printf 'runners; do not invent a Python runner, and make the build manifest\n'
+      printf 'declare the held-out target ONLY when its directory exists.\n'
       printf 'Tests must FAIL now (no implementation exists yet) and pass once the\n'
       printf 'described behavior exists. Then end with the status block.\n'
     )"
     [ -s factory/CONTRACT.md ] || die "exam board produced no CONTRACT.md"
-    NV=$(find factory/tests/visible -type f ! -name '.gitkeep' 2>/dev/null | wc -l | tr -d ' ')
-    NH=$(find factory/tests/heldout -type f ! -name '.gitkeep' 2>/dev/null | wc -l | tr -d ' ')
-    [ -x factory/tests/run-visible.sh ] || chmod +x factory/tests/run-visible.sh 2>/dev/null
-    [ -x factory/tests/run-heldout.sh ] || chmod +x factory/tests/run-heldout.sh 2>/dev/null
-    [ -f factory/tests/run-visible.sh ] || die "exam board wrote no run-visible.sh"
-    [ -f factory/tests/run-heldout.sh ] || die "exam board wrote no run-heldout.sh"
-    [ "$NV" -ge 3 ] || die "exam_gate: only $NV visible check files (need >=3)"
-    [ "$NH" -ge 2 ] || die "exam_gate: only $NH held-out check files (need >=2)"
+    NV=$(find "$VISIBLE_DIR" -type f ! -name '.gitkeep' 2>/dev/null | wc -l | tr -d ' ')
+    NH=$(find "$HELDOUT_DIR" -type f ! -name '.gitkeep' 2>/dev/null | wc -l | tr -d ' ')
+    [ "$NV" -ge 3 ] || die "exam_gate: only $NV visible check files in $VISIBLE_DIR (need >=3)"
+    [ "$NH" -ge 2 ] || die "exam_gate: only $NH held-out check files in $HELDOUT_DIR (need >=2)"
+    # A runner script is only required when the toolchain does not declare a
+    # command of its own. Requiring run-visible.sh in a Swift project is how the
+    # gate passed while verifying nothing.
+    if [ "$VISIBLE_CMD" = "bash factory/tests/run-visible.sh" ]; then
+      [ -f factory/tests/run-visible.sh ] || die "exam board wrote no run-visible.sh"
+      chmod +x factory/tests/run-visible.sh 2>/dev/null
+    fi
+    if [ "$HELDOUT_CMD" = "bash factory/tests/run-heldout.sh" ]; then
+      [ -f factory/tests/run-heldout.sh ] || die "exam board wrote no run-heldout.sh"
+      chmod +x factory/tests/run-heldout.sh 2>/dev/null
+    fi
     # Tests must fail before the implementation exists. A suite that is green on
     # an empty repo is testing nothing.
-    if bash factory/tests/run-visible.sh >/dev/null 2>&1; then
+    if run_visible_suite "$RUN/exam-probe.log"; then
       die "exam_gate: visible suite passes against an empty repo — it tests nothing"
     fi
-    echo "[bootstrap] ✓ exam_gate ($NV visible files, $NH held-out files, suite red on empty repo)" >&2
+    # Second look at the toolchain, now that the exam board has had its turn: a
+    # runner script it was told to write and did not is a failure HERE, where it
+    # is actionable, rather than at 3am inside a task that cannot verify itself.
+    bash "$HERE/toolchain.sh" check post-exam \
+      || die "toolchain_gate(post-exam): the declared suites are not runnable"
+    echo "[bootstrap] ✓ exam_gate ($NV visible files in $VISIBLE_DIR, $NH held-out in $HELDOUT_DIR, suite red on empty repo)" >&2
     ;;
 
   workorder)
@@ -212,8 +289,18 @@ PY
       printf '\n\n===== INPUT: decompose.json =====\n'; cat factory/.planning/decompose.json
       printf '\n\n===== INPUT: CONTRACT.md =====\n'; cat factory/CONTRACT.md
       printf '\nWrite factory/.planning/plan.json (one slice per non-backlog task) and\n'
-      printf 'factory/HANDOFF.md with the Orientation Q&A. The verify command is:\n'
-      printf '  bash factory/tests/run-visible.sh\n'
+      printf 'factory/HANDOFF.md with the Orientation Q&A.\n'
+      # The verify command is the PROJECT's, from factory/toolchain.env — not the
+      # python runner script this used to name. A literal here lands verbatim in a
+      # task's `Verify:` field, nightshift's task_verify_cmd uses it unchanged, and
+      # in a Swift project every task then measures `bash: run-visible.sh: No such
+      # file or directory` — exit 127, which is exactly the false-green the receipt
+      # parser was rewritten to refuse.
+      printf 'The project-wide visible verify command is:\n'
+      printf '  %s\n' "$VISIBLE_CMD"
+      printf 'Per-task Verify: lines must be a real slice of THAT command (for\n'
+      printf 'example a --filter naming one task, or - to inherit it whole). Never\n'
+      printf 'name a runner script the toolchain does not declare.\n'
       printf 'Be honest with qualifier: mark weak where you are guessing.\n'
       printf 'Then end with the status block.\n'
     )"
@@ -290,7 +377,14 @@ PY
     done
     ;;
   esac
+
+  # Commit what this stage produced, before the next one runs. A gate failure
+  # exits above, so HEAD always holds exactly the stages that passed — and a
+  # sealed launch (which builds its worktree from HEAD) can never again see a
+  # tree with no plan in it.
+  commit_artifacts "$STAGE"
 done
 
-state_set "READY_FOR_NIGHT_SHIFT" "bootstrap complete; run scripts/nightshift.sh"
+state_set "READY_FOR_NIGHT_SHIFT" "bootstrap complete; run scripts/foreman.sh launch"
+commit_artifacts "bootstrap complete"
 status_emit "bootstrap" "-" "DONE" "bootstrap pipeline complete through work order"

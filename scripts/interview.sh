@@ -8,7 +8,7 @@
 # It hands the planner the interview skill as the opening prompt, because
 # nothing is auto-discovered: the skill file IS the instruction set.
 #
-# Usage: bash scripts/interview.sh [--resume]
+# Usage: bash scripts/interview.sh [--resume] [--print]
 
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,17 +18,20 @@ cd "$ROOT" || exit 1
 # shellcheck source=lib/status.sh
 . "$HERE/lib/status.sh" 2>/dev/null || true
 
+PRINT=0
+for a in "$@"; do [ "$a" = "--print" ] && PRINT=1; done
+
 MODEL="${BODEGA_PLANNER_MODEL:-claude-opus-4-8}"
 STAGE="$(awk -F': *' '/^STAGE:/{print $2; exit}' factory/STATE.md 2>/dev/null || echo IDLE)"
 
-printf '\033[1m Software Bodega \033[0m\n'
-printf '  project : %s\n' "$ROOT"
-printf '  stage   : %s\n' "${STAGE:-IDLE}"
-printf '  planner : %s (interactive)\n\n' "$MODEL"
+printf '\033[1m Software Bodega \033[0m\n' >&2
+printf '  project : %s\n' "$ROOT" >&2
+printf '  stage   : %s\n' "${STAGE:-IDLE}" >&2
+printf '  planner : %s (interactive)\n\n' "$MODEL" >&2
 
 if [ "${1:-}" = "--resume" ] || [ -s factory/BRIEF.md ] && grep -q '^## Decisions made' factory/BRIEF.md 2>/dev/null; then
-  printf '  A brief already exists. Resuming — say what you want to change,\n'
-  printf '  or run the next station:  bash scripts/bootstrap.sh --from spec\n\n'
+  printf '  A brief already exists. Resuming — say what you want to change,\n' >&2
+  printf '  or run the next station:  bash scripts/bootstrap.sh --from spec\n\n' >&2
 fi
 
 # Sanity: the skill file is the instruction set. Without it this is just a chat.
@@ -58,5 +61,14 @@ PROMPT="$(
 # run_role has the same guard; these scripts call omp directly and need it too.
 case "$PROMPT" in -*) PROMPT="
 $PROMPT" ;; esac
+
+# --print exists so scripts/selftest.sh can assert on the ASSEMBLED prompt. The
+# check used to grep this file for the guard line above: that passes for a
+# comment, passes for dead code, and fails when the guard is written some other
+# correct way. Emitting the bytes the CLI would receive is the real test.
+if [ "$PRINT" = "1" ]; then
+  printf '%s\n' "$PROMPT"
+  exit 0
+fi
 
 exec omp --model "$MODEL" "$PROMPT"
