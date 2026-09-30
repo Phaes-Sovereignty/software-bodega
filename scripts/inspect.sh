@@ -27,11 +27,23 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# hard rule 2: the judge must not share a family with the author of the work
-assert_cross_family judge executor || {
-  echo "[inspect] REFUSING: judge shares a model family with the executor" >&2
-  status_emit "inspector" "-" "BLOCKED" "judge/executor family collision"; exit 1
+# hard rule 2: the judge must not share a family with the author of the work.
+#
+# NOT `assert_cross_family judge executor`. That compares a role against a role,
+# once, and still passes when the escalation ladder had the planner (same family
+# as the judge) write the code under review. The author here is whoever actually
+# produced the accepted commits — recorded per rung in
+# factory/.planning/author-families.txt — and the judge is chosen against that
+# set. When no cross-family judge exists this REFUSES rather than quietly grading
+# its own homework.
+AUTHOR_FAMS="$(author_families)"
+[ -n "$AUTHOR_FAMS" ] || AUTHOR_FAMS="$(role_family executor)"
+JUDGE_ROLE="$(judge_for_family "$AUTHOR_FAMS")" || {
+  echo "[inspect] REFUSING: every configured judge role shares a family with the authors ($AUTHOR_FAMS)" >&2
+  status_emit "inspector" "-" "BLOCKED" "no cross-family judge available for authors $AUTHOR_FAMS"; exit 1
 }
+echo "[inspect] authors: $AUTHOR_FAMS -> judge: $JUDGE_ROLE ($(role_family "$JUDGE_ROLE"))" >&2
+log_append "inspector" "judge_selected" "$JUDGE_ROLE ($(role_family "$JUDGE_ROLE")) vs authors $AUTHOR_FAMS"
 
 SHA="$(git rev-parse HEAD)"
 R="$(mktemp -d)"
@@ -44,10 +56,15 @@ echo "[inspect] head=$SHA base=$BASE" >&2
 log_append "inspector" "start" "head=$SHA"
 
 # --- 1. visible suite, TWICE ----------------------------------------------
+# Both suites come from scripts/lib/toolchain.sh, not from a hard-coded
+# run-visible.sh. A Swift project's visible suite is `swift test --filter
+# VisibleTests`; inspecting it with the shell runner reads a file the project
+# does not have and reports 127 as though it were a test result.
+echo "[inspect] visible: $VISIBLE_CMD" >&2
 echo "[inspect] running visible suite (run 1 of 2)" >&2
-bash factory/tests/run-visible.sh > "$R/vis1.log" 2>&1; V1=$?
+run_visible_suite "$R/vis1.log"; V1=$?
 echo "[inspect] running visible suite (run 2 of 2)" >&2
-bash factory/tests/run-visible.sh > "$R/vis2.log" 2>&1; V2=$?
+run_visible_suite "$R/vis2.log"; V2=$?
 FLAKY="no"
 if [ "$V1" != "$V2" ]; then
   FLAKY="YES — run1 exit $V1, run2 exit $V2"
@@ -55,11 +72,21 @@ if [ "$V1" != "$V2" ]; then
 fi
 
 # --- 2. held-out suite — the checks the builder never saw ------------------
-echo "[inspect] running held-out suite" >&2
-if [ -f factory/tests/run-heldout.sh ]; then
-  bash factory/tests/run-heldout.sh > "$R/held.log" 2>&1; H=$?
+# Where HELDOUT_CMD finally gets read. It was declared in
+# docs/toolchains/swift.env and referenced by nothing, so a Swift night was
+# inspected against the visible suite only and the most important mechanism in
+# the design never ran.
+echo "[inspect] held-out: $HELDOUT_CMD (dir $HELDOUT_DIR)" >&2
+if [ ! -d "$HELDOUT_DIR" ]; then
+  printf 'held-out suite directory %s is absent — cannot prove the held-out checks ran\n' \
+    "$HELDOUT_DIR" > "$R/held.log"
+  H=127
 else
-  echo "no held-out runner present" > "$R/held.log"; H=127
+  run_heldout_suite "$R/held.log"; H=$?
+fi
+if [ "$H" = "127" ]; then
+  echo "[inspect] NO HELD-OUT EVIDENCE — missing evidence is not green" >&2
+  log_append "inspector" "heldout_missing" "$HELDOUT_CMD"
 fi
 
 # --- 3. tamper audit — mechanical, not an opinion --------------------------
@@ -73,11 +100,23 @@ fi
   fi
   echo
   echo "### Test files changed since base (any change here needs justification)"
-  git diff --name-only "$BASE".."$SHA" -- factory/tests/ | sed 's/^/  /' || true
-  git diff --quiet "$BASE".."$SHA" -- factory/tests/ 2>/dev/null && echo "  NONE — exam suites untouched."
+  # $VISIBLE_DIR and $HELDOUT_DIR, not a hard-coded factory/tests/ — in a Swift
+  # package the exams live under Tests/ and a tamper there would have been
+  # invisible to this audit.
+  git diff --name-only "$BASE".."$SHA" -- "$VISIBLE_DIR" "$HELDOUT_DIR" factory/tests/ | sed 's/^/  /' || true
+  git diff --quiet "$BASE".."$SHA" -- "$VISIBLE_DIR" "$HELDOUT_DIR" factory/tests/ 2>/dev/null \
+    && echo "  NONE — exam suites untouched."
+  echo
+  echo "### Held-out seal audit — did any commit add files under $HELDOUT_DIR after the exam board?"
+  if git diff --name-only "$BASE".."$SHA" -- "$HELDOUT_DIR" 2>/dev/null | grep -q .; then
+    echo "!!! files under $HELDOUT_DIR changed since base:"
+    git diff --name-only "$BASE".."$SHA" -- "$HELDOUT_DIR" | sed 's/^/  /'
+  else
+    echo "  none — held-out suite untouched."
+  fi
   echo
   echo "### Weakening markers introduced in the diff"
-  git diff "$BASE".."$SHA" -- factory/tests/ | grep -E '^\+' \
+  git diff "$BASE".."$SHA" -- "$VISIBLE_DIR" "$HELDOUT_DIR" factory/tests/ | grep -E '^\+' \
     | grep -nE 'skip|xfail|assert True|pass *$|TODO|@unittest.skip' | head -20 \
     || echo "  none found"
 } > "$R/tamper.txt" 2>&1
@@ -113,8 +152,8 @@ PROMPT="$(
   printf 'End with the FACTORY_STATUS block.\n'
 )"
 
-echo "[inspect] invoking judge ($(role_family judge), artifact-only)" >&2
-run_role judge "$PROMPT" > "$R/verdict.out" 2>>factory/log.md
+echo "[inspect] invoking $JUDGE_ROLE ($(role_family "$JUDGE_ROLE"), artifact-only)" >&2
+run_role "$JUDGE_ROLE" "$PROMPT" > "$R/verdict.out" 2>>factory/log.md
 
 VERDICT="$(grep -m1 -oE "Verdict on [0-9a-f]+: *(SHIP|FIX FIRST|NOT DONE)" factory/REVIEW.md "$R/verdict.out" 2>/dev/null | head -1 | sed 's/^[^:]*://')"
 [ -s factory/REVIEW.md ] || cp "$R/verdict.out" factory/REVIEW.md
@@ -122,10 +161,11 @@ VERDICT="$(grep -m1 -oE "Verdict on [0-9a-f]+: *(SHIP|FIX FIRST|NOT DONE)" facto
 mkdir -p factory/.planning/gate-results
 jq -n --arg sha "$SHA" --arg v "${VERDICT:-UNPARSEABLE}" --arg f "$FLAKY" \
       --argjson v1 "$V1" --argjson v2 "$V2" --argjson h "$H" \
-      --arg jf "$(role_family judge)" --arg ef "$(role_family executor)" \
+      --arg jf "$(role_family "$JUDGE_ROLE")" --arg ef "$AUTHOR_FAMS" \
+      --arg jr "$JUDGE_ROLE" \
       --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   '{gate:"inspection",sha:$sha,verdict:$v,visible_run1:$v1,visible_run2:$v2,
-    heldout:$h,flaky:$f,judge_family:$jf,executor_family:$ef,ts:$ts,
+    heldout:$h,flaky:$f,judge_role:$jr,judge_family:$jf,author_families:$ef,ts:$ts,
     pass:(($v|test("SHIP")) and $v1==0 and $v2==0 and $h==0)}' \
   > "factory/.planning/gate-results/inspection-$SHA.json"
 

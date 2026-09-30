@@ -18,7 +18,9 @@ cd "$FACTORY_ROOT" || exit 1
 
 DRY_RUN=0
 ISSUE=""
-VISIBLE_CMD="${VISIBLE_CMD:-bash factory/tests/run-visible.sh}"
+# VISIBLE_CMD / HELDOUT_DIR come from scripts/lib/toolchain.sh via status.sh.
+# Re-defaulting them here is what let the seal and the suite disagree about
+# where the tests live.
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -55,24 +57,18 @@ trap cleanup EXIT
 
 # --- isolated worktree with held-out tests PHYSICALLY absent ---------------
 # Not a prompt promise — the files are not on disk in the worker's checkout.
-git worktree add -q --no-checkout -b "$BRANCH" "$WT" "$BASE_SHA" 2>/dev/null || {
-  git worktree add -q --no-checkout --detach "$WT" "$BASE_SHA" || { echo "[runner] worktree failed" >&2; exit 1; }
-}
-(
-  cd "$WT" || exit 1
-  git sparse-checkout init --no-cone -q 2>/dev/null
-  git sparse-checkout set '/*' '!/factory/tests/heldout/' '!/factory/tests/heldout/*' -q 2>/dev/null
-  git checkout -q 2>/dev/null
-  rm -rf factory/tests/heldout 2>/dev/null   # belt and braces
-)
-
-if [ -d "$WT/factory/tests/heldout" ]; then
-  echo "[runner] FATAL: held-out seal broken — heldout/ present in worker tree" >&2
-  log_append "runner" "seal_broken" "issue #$ISSUE"
+# The path sealed is $HELDOUT_DIR, which the project declares. Sealing
+# factory/tests/heldout in a Swift project seals an empty directory and leaves
+# Tests/HeldoutTests fully readable while the log claims the opposite.
+# One implementation, also what scripts/tests/test-seal.sh exercises — so the
+# test cannot drift from the product the way three hand-copied git sequences did.
+if ! create_sealed_tree "$FACTORY_ROOT" "$WT" "$BRANCH" "$BASE_SHA"; then
+  echo "[runner] FATAL: could not create a sealed worker tree ($HELDOUT_DIR)" >&2
+  log_append "runner" "seal_broken" "issue #$ISSUE dir=$HELDOUT_DIR"
   status_emit "runner" "$ISSUE" "BLOCKED" "held-out seal broken; refusing to run worker"
   exit 1
 fi
-echo "[runner] seal verified: factory/tests/heldout absent from worker tree" >&2
+echo "[runner] seal verified: $HELDOUT_DIR absent from worker tree" >&2
 
 # --- worker ---------------------------------------------------------------
 PROMPT="$(
@@ -155,7 +151,7 @@ Other behavior changes: None
 
 ## Seal
 Held-out tests were absent from the worker checkout (sparse checkout excluded
-\`factory/tests/heldout/\`). CI fetches them independently.
+\`$HELDOUT_DIR/\`). CI fetches them independently.
 PRBODY
 )" 2>/dev/null || echo "[runner] gh pr create failed" >&2
 fi

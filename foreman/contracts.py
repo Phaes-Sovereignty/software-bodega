@@ -145,13 +145,59 @@ class SealError(Exception):
     pass
 
 
+DEFAULT_HELDOUT = "factory/tests/heldout"
+
+
+def read_toolchain(root: Path) -> dict[str, str]:
+    """Parse factory/toolchain.env for the handful of keys this module needs.
+
+    A shell profile read from Python is uncomfortable territory, so this is
+    deliberately narrow: `KEY=value` / `KEY="value"` lines, comments and `export`
+    prefixes ignored, no shell evaluation of any kind. Evaluating someone's
+    .env from Python would let a project's profile run arbitrary code during
+    `foreman launch`.
+
+    HELDOUT_DIR is the reason this exists. Sealing a hard-coded
+    factory/tests/heldout in a Swift package seals an empty directory and leaves
+    Tests/HeldoutTests readable by every worker, while the log reports the seal
+    as verified.
+    """
+    out: dict[str, str] = {}
+    f = Path(root) / "factory" / "toolchain.env"
+    if not f.exists():
+        return out
+    for line in f.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        if k in ("HELDOUT_DIR", "VISIBLE_DIR", "VISIBLE_CMD", "HELDOUT_CMD", "BUILD_CMD"):
+            out[k] = v
+    return out
+
+
+def heldout_dir(root: Path, override: str | None = None) -> str:
+    """The one answer to "which directory must workers not be able to read"."""
+    if override:
+        return override.rstrip("/")
+    return (read_toolchain(Path(root)).get("HELDOUT_DIR") or DEFAULT_HELDOUT).rstrip("/")
+
+
 def _git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(root), *args],
                           capture_output=True, text=True, check=check)
 
 
 def create_sealed_worktree(root: Path, dest: Path, ref: str = "HEAD",
-                           heldout: str = "factory/tests/heldout",
+                           heldout: str | None = None,
                            branch: str | None = None) -> Path:
     """A worker sandbox with the held-out suite physically absent.
 
@@ -161,6 +207,7 @@ def create_sealed_worktree(root: Path, dest: Path, ref: str = "HEAD",
     Verified before returning — this function never hands back a leaky tree.
     """
     dest = Path(dest)
+    heldout = heldout_dir(Path(root), heldout)
     if dest.exists():
         raise SealError(f"worktree destination already exists: {dest}")
     args = ["worktree", "add", "--no-checkout", "-q"]
@@ -171,10 +218,32 @@ def create_sealed_worktree(root: Path, dest: Path, ref: str = "HEAD",
     args += [str(dest), ref]
     _git(root, *args)
 
-    sub = lambda *a: subprocess.run(["git", "-C", str(dest), *a],  # noqa: E731
-                                    capture_output=True, text=True)
+    def sub(*a: str) -> str:
+        """Run git in the sandbox and RAISE on failure.
+
+        The original helper returned the CompletedProcess and nobody read
+        .returncode, so a rejected command was indistinguishable from a
+        successful one. That is exactly how the shell side failed for the same
+        reason: `git sparse-checkout init -q` exits 129, the patterns were never
+        written, the seal degraded to `rm -rf`, and a worker got its exam back
+        with one `git checkout`. Silent is not the same as working.
+        """
+        r = subprocess.run(["git", "-C", str(dest), *a], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise SealError(
+                f"seal step failed (git {' '.join(a)}): rc={r.returncode} "
+                f"{(r.stderr or r.stdout).strip()[:200]}")
+        return r.stdout
+
     sub("sparse-checkout", "init", "--no-cone")
     sub("sparse-checkout", "set", "/*", f"!/{heldout}/", f"!/{heldout}/*")
+    # The patterns must be LIVE before the checkout — otherwise checkout
+    # materialises every tracked file, held-out suite included. Assert the
+    # exclusion is in effect rather than trusting the previous call.
+    live = sub("sparse-checkout", "list")
+    if f"!/{heldout}/" not in live:
+        raise SealError(
+            f"seal not active: patterns are {live.split()!r}, expected to exclude {heldout}")
     sub("checkout")
     shutil.rmtree(dest / heldout, ignore_errors=True)
 
@@ -182,9 +251,16 @@ def create_sealed_worktree(root: Path, dest: Path, ref: str = "HEAD",
     return dest
 
 
-def verify_seal(tree: Path, heldout: str = "factory/tests/heldout") -> None:
-    """Raise if any held-out file is reachable inside the sandbox."""
-    d = Path(tree) / heldout
+def verify_seal(tree: Path, heldout: str | None = None) -> None:
+    """Raise if any held-out file is reachable inside the sandbox.
+
+    With no explicit path, the tree's own factory/toolchain.env decides — the
+    sealed directory is a property of the PROJECT, not of this module.
+    """
+    tree = Path(tree)
+    if heldout is None:
+        heldout = heldout_dir(tree)
+    d = tree / heldout
     if d.exists():
         raise SealError(f"seal broken: {d} exists in the worker tree")
     leaked = [p for p in Path(tree).rglob("*")

@@ -9,8 +9,25 @@ Role: **planner**, in a **fresh session that has seen no implementation and no
 plan**. This isolation is the entire point of the station. If you have been
 reading the blueprint or writing code in this session, stop and start a new one.
 
-Input: `factory/.planning/spec.json` only.
-Output: `factory/CONTRACT.md`, `factory/tests/visible/*`, `factory/tests/heldout/*`.
+Input: `factory/.planning/spec.json`, plus the **resolved toolchain block** the
+driver appends (`HELDOUT_DIR`, `VISIBLE_DIR`, `VISIBLE_CMD`, `HELDOUT_CMD`,
+`BUILD_CMD`). That block comes from `scripts/toolchain.sh`, which runs *before*
+this station precisely so you do not have to guess a language.
+
+Output: `factory/CONTRACT.md`, plus the two suites **in the directories the
+toolchain names**.
+
+> **Write the held-out suite where `HELDOUT_DIR` says.** The factory seals by
+> that value: the seal removes it, CI tarballs it, the scope check refuses
+> changes under it. If you write `Tests/HeldoutTests` while the profile says
+> `factory/tests/heldout` — or the other way round — the builder can read your
+> exam and every log in the system will claim it could not. This is the exact
+> failure that made the Swift path silently lose the most important mechanism in
+> the design.
+>
+> **Do not assume Python.** "stdlib only" was the old instruction and it is gone.
+> Write tests in the project's own language and framework, runnable by
+> `HELDOUT_CMD`/`VISIBLE_CMD` as declared.
 
 ## The partition — decided now, never later
 
@@ -18,10 +35,12 @@ You split tests into visible and held-out **at authoring time**, before any code
 exists. This is what makes the held-out half meaningful: it cannot be
 reverse-engineered from what the builder was allowed to see.
 
-**`factory/tests/visible/`** — the builder sees these and drives TDD against
-them. They cover the happy path and the obvious errors. Roughly 70% of checks.
+**`$VISIBLE_DIR`** (`factory/tests/visible/` by default) — the builder sees these
+and drives TDD against them. They cover the happy path and the obvious errors.
+Roughly 70% of checks.
 
-**`factory/tests/heldout/`** — the builder **never** sees these. They test the
+**`$HELDOUT_DIR`** (`factory/tests/heldout/` by default, `Tests/HeldoutTests` for
+SwiftPM) — the builder **never** sees these. They test the
 same criteria from an angle the visible tests do not: resource leaks across many
 cycles, behavior when a dependency dies mid-operation, performance at 100× the
 toy input, boundary values, idempotency on retry. Roughly 30%, minimum 2.
@@ -123,7 +142,10 @@ contract with a new signature, not a quiet edit.
 
 ## exam_gate
 
-- [ ] ≥3 visible checks and ≥2 held-out checks
+- [ ] ≥3 visible checks and ≥2 held-out checks **inside the declared directories**
+      (the driver counts files under `$VISIBLE_DIR` / `$HELDOUT_DIR`, so a
+      correctly-sized suite in the wrong place fails this gate rather than
+      passing it vacuously)
 - [ ] every AC-N is covered by at least one check
 - [ ] the visible suite **runs and exits 0 against an empty/skeleton repo only
       where it should** — tests must fail before the feature exists (a test that

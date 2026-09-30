@@ -3,6 +3,13 @@ name: factory
 # The Small Loop's foreman. Nothing self-merges; this decides what a human is
 # allowed to merge. Missing evidence NEVER counts as green — every job that
 # cannot prove its result fails.
+#
+# NOTHING HERE HARD-CODES A LANGUAGE OR A TEST PATH. The `detect` job asks the
+# project's own factory/toolchain.env (via scripts/toolchain.sh) where the suites
+# live and how to run them, and every later job uses that answer. Previously this
+# file assumed factory/tests/heldout + python3 + run-heldout.sh, so a Swift PR
+# got a held-out job that unpacked a tarball into a directory the project does
+# not use and then ran a shell script that did not exist.
 
 on:
   pull_request:
@@ -14,109 +21,168 @@ permissions:
   pull-requests: write
 
 jobs:
-  build:
+  detect:
     runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.tc.outputs.runner }}
+      setup: ${{ steps.tc.outputs.setup }}
+      kind: ${{ steps.tc.outputs.kind }}
+      heldout_dir: ${{ steps.tc.outputs.heldout_dir }}
+      visible_dir: ${{ steps.tc.outputs.visible_dir }}
+      visible_cmd: ${{ steps.tc.outputs.visible_cmd }}
+      heldout_cmd: ${{ steps.tc.outputs.heldout_cmd }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tc
+        run: |
+          set -euo pipefail
+          matrix="$(bash scripts/toolchain.sh ci-matrix)"
+          echo "runner=$(printf '%s' "$matrix" | sed -n 's/.*"runner":"\([^"]*\)".*/\1/p')"       >> "$GITHUB_OUTPUT"
+          echo "setup=$(printf '%s' "$matrix" | sed -n 's/.*"setup":"\([^"]*\)".*/\1/p')"         >> "$GITHUB_OUTPUT"
+          echo "kind=$(printf '%s' "$matrix" | sed -n 's/.*"kind":"\([^"]*\)".*/\1/p')"           >> "$GITHUB_OUTPUT"
+          echo "heldout_dir=$(bash scripts/toolchain.sh get HELDOUT_DIR)"   >> "$GITHUB_OUTPUT"
+          echo "visible_dir=$(bash scripts/toolchain.sh get VISIBLE_DIR)"   >> "$GITHUB_OUTPUT"
+          echo "visible_cmd=$(bash scripts/toolchain.sh get VISIBLE_CMD)"   >> "$GITHUB_OUTPUT"
+          echo "heldout_cmd=$(bash scripts/toolchain.sh get HELDOUT_CMD)"   >> "$GITHUB_OUTPUT"
+      - name: Refuse a toolchain that cannot be honoured
+        run: |
+          set -euo pipefail
+          d="$(bash scripts/toolchain.sh get HELDOUT_DIR)"
+          case "$d" in
+            ""|/*|*..*) echo "::error::HELDOUT_DIR='$d' is empty, absolute, or escapes the repo"; exit 1 ;;
+          esac
+          if [ "$d" = "factory/tests/heldout" ] && [ ! -d factory/tests/heldout ] && [ -d Tests/HeldoutTests ]; then
+            echo "::error::Tests/HeldoutTests exists but factory/toolchain.env does not declare HELDOUT_DIR."
+            echo "::error::The seal would remove an empty directory and the builder would read the exam."
+            exit 1
+          fi
+
+  build:
+    needs: detect
+    runs-on: ${{ needs.detect.outputs.runner }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - uses: actions/setup-python@v5
+      - name: Setup (python)
+        if: needs.detect.outputs.setup == 'python'
+        uses: actions/setup-python@v5
         with: { python-version: '3.11' }
-      - name: Build
+      - name: Setup (node)
+        if: needs.detect.outputs.setup == 'node'
+        uses: actions/setup-node@v4
+      - name: Setup (swift)
+        if: needs.detect.outputs.setup == 'swift'
+        run: swift --version
+      - name: Install dependencies
         run: |
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           if [ -f pyproject.toml ]; then pip install -e . || true; fi
+          if [ -f package.json ]; then npm ci || npm install; fi
+      - name: Build
+        run: |
           bash -n scripts/*.sh scripts/lib/*.sh
+          cmd="$(bash scripts/toolchain.sh get BUILD_CMD)"
+          if [ -n "$cmd" ]; then echo "BUILD_CMD: $cmd"; eval "$cmd"; else echo "no BUILD_CMD declared"; fi
 
   visible:
-    runs-on: ubuntu-latest
-    needs: build
+    needs: [detect, build]
+    runs-on: ${{ needs.detect.outputs.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Setup (python)
+        if: needs.detect.outputs.setup == 'python'
+        uses: actions/setup-python@v5
         with: { python-version: '3.11' }
-      - name: Visible suite
+      - name: Setup (node)
+        if: needs.detect.outputs.setup == 'node'
+        uses: actions/setup-node@v4
+      - name: Install dependencies
         run: |
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          test -f factory/tests/run-visible.sh || { echo "::error::no visible runner — cannot prove green"; exit 1; }
-          bash factory/tests/run-visible.sh | tee visible.log
+          if [ -f pyproject.toml ]; then pip install -e . || true; fi
+          if [ -f package.json ]; then npm ci || npm install; fi
+      - name: Visible suite
+        env:
+          VISIBLE_CMD: ${{ needs.detect.outputs.visible_cmd }}
+          VISIBLE_DIR: ${{ needs.detect.outputs.visible_dir }}
+        run: |
+          set -euo pipefail
+          [ -n "$VISIBLE_CMD" ] || { echo "::error::no visible command — cannot prove green"; exit 1; }
+          if [ ! -d "$VISIBLE_DIR" ]; then
+            echo "::error::visible suite directory '$VISIBLE_DIR' is absent — missing evidence is not a pass"
+            exit 1
+          fi
+          echo "visible: $VISIBLE_CMD"
+          eval "$VISIBLE_CMD" | tee visible.log
       - uses: actions/upload-artifact@v4
         with: { name: visible-receipt, path: visible.log }
 
   heldout:
-    runs-on: ubuntu-latest
-    needs: build
+    needs: [detect, build]
+    runs-on: ${{ needs.detect.outputs.runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Setup (python)
+        if: needs.detect.outputs.setup == 'python'
+        uses: actions/setup-python@v5
         with: { python-version: '3.11' }
+      - name: Setup (node)
+        if: needs.detect.outputs.setup == 'node'
+        uses: actions/setup-node@v4
       # The worker never sees these. They arrive here and only here.
       # If >40KB, swap this step for a private-repo checkout with a PAT.
       - name: Fetch held-out suite from secrets
         env:
           HELDOUT_TESTS: ${{ secrets.HELDOUT_TESTS }}
+          HELDOUT_DIR: ${{ needs.detect.outputs.heldout_dir }}
         run: |
+          set -euo pipefail
           if [ -z "$HELDOUT_TESTS" ]; then
             echo "::error::HELDOUT_TESTS secret is empty — held-out suite cannot run."
             echo "::error::Missing evidence is not a pass. Failing."
             exit 1
           fi
-          rm -rf factory/tests/heldout
-          mkdir -p factory/tests/heldout
-          echo "$HELDOUT_TESTS" | base64 -d | tar xz -C factory/tests/heldout
-          echo "held-out checks unpacked: $(find factory/tests/heldout -type f | wc -l)"
+          [ -n "$HELDOUT_DIR" ] || { echo "::error::HELDOUT_DIR resolved empty"; exit 1; }
+          echo "sealing target: $HELDOUT_DIR (toolchain-declared, not hard-coded)"
+          rm -rf "$HELDOUT_DIR"
+          mkdir -p "$HELDOUT_DIR"
+          echo "$HELDOUT_TESTS" | base64 -d | tar xz -C "$HELDOUT_DIR"
+          echo "held-out checks unpacked: $(find "$HELDOUT_DIR" -type f | wc -l)"
       - name: Held-out suite
+        env:
+          HELDOUT_CMD: ${{ needs.detect.outputs.heldout_cmd }}
         run: |
+          set -euo pipefail
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          test -f factory/tests/run-heldout.sh || { echo "::error::no held-out runner"; exit 1; }
-          bash factory/tests/run-heldout.sh | tee heldout.log
+          [ -n "$HELDOUT_CMD" ] || { echo "::error::no held-out command — cannot prove green"; exit 1; }
+          echo "heldout: $HELDOUT_CMD"
+          eval "$HELDOUT_CMD" | tee heldout.log
       - uses: actions/upload-artifact@v4
         with: { name: heldout-receipt, path: heldout.log }
 
   scope:
-    runs-on: ubuntu-latest
-    needs: build
+    needs: detect
+    runs-on: ${{ needs.detect.outputs.runner }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - name: Scope check — diff must match the declared file manifest
+      - name: Scope + seal check
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          git diff --name-only "$BASE".."$HEAD" | sort -u > changed.txt
-          # declared manifest = the "- path" lines under "Files changed:"
-          printf '%s\n' "$PR_BODY" | sed -n '/Files changed:/,/^$/p' \
-            | sed -n 's/^[[:space:]]*-[[:space:]]*//p' | sort -u > declared.txt
-          echo "--- changed ---"; cat changed.txt
-          echo "--- declared ---"; cat declared.txt
-          if [ ! -s declared.txt ]; then
-            echo "::error::PR body declares no file manifest — scope cannot be checked."
-            echo "::error::Missing evidence is not a pass. Failing."
-            exit 1
-          fi
-          if comm -23 changed.txt declared.txt | grep -q .; then
-            echo "::error::files changed outside the declared manifest:"
-            comm -23 changed.txt declared.txt
-            exit 1
-          fi
-          # the ledger line must be present and honest
-          printf '%s\n' "$PR_BODY" | grep -q "Other behavior changes:" \
-            || { echo "::error::PR body has no scope ledger line"; exit 1; }
-          echo "scope OK"
-      - name: Held-out seal check
-        run: |
-          # The PR must never carry held-out tests. If it does, the seal leaked.
-          if git diff --name-only "${{ github.event.pull_request.base.sha }}".."${{ github.event.pull_request.head.sha }}" \
-             | grep -q '^factory/tests/heldout/'; then
-            echo "::error::PR touches factory/tests/heldout/ — seal broken"
-            exit 1
-          fi
-          echo "seal OK"
+          set -euo pipefail
+          git diff --name-only "$BASE".."$HEAD" > changed.txt
+          printf '%s\n' "$PR_BODY" > pr-body.txt
+          # One script, also exercised by scripts/selftest.sh. The logic used to
+          # be inline YAML and the selftest re-typed it into a shell function, so
+          # the "test" validated a transcription instead of what CI runs.
+          bash scripts/ci-scope.sh check changed.txt pr-body.txt
 
   review:
-    runs-on: ubuntu-latest
-    needs: [visible, heldout, scope]
+    needs: [detect, visible, heldout, scope]
+    runs-on: ${{ needs.detect.outputs.runner }}
     if: always()
     steps:
       - uses: actions/checkout@v4
@@ -132,10 +198,17 @@ jobs:
           V: ${{ needs.visible.result }}
           H: ${{ needs.heldout.result }}
           S: ${{ needs.scope.result }}
+          D: ${{ needs.detect.result }}
         run: |
           # Artifact-only context: contract + diff + receipts. Never a transcript.
           PR=${{ github.event.pull_request.number }}
           BASE=${{ github.event.pull_request.base.sha }}
+          if [ "$D" != "success" ]; then
+            # detect failed => the toolchain is unusable. That is missing evidence,
+            # and it must not be reported as a green run of nothing.
+            echo "::error::toolchain detection failed — no evidence could be gathered"
+            exit 1
+          fi
           if [ "$V" != "success" ] || [ "$H" != "success" ] || [ "$S" != "success" ]; then
             {
               printf 'Verdict on %s: NOT DONE\n\n' "$SHA"
@@ -153,6 +226,9 @@ jobs:
             gh pr comment "$PR" --body-file verdict.txt
             exit 0
           fi
+          # Cross-family judge. The CI executor is the PR's author, and its family
+          # is whatever the night shift used; models.env is the same file here, so
+          # the check is real rather than decorative.
           npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 || true
           {
             cat skills/inspector/SKILL.md
