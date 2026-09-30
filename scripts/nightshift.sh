@@ -17,12 +17,25 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "$FACTORY_ROOT" || exit 1
 
+# The verification arithmetic (fail_count, swift_fail_count, test_counts,
+# verify_ok) lives in scripts/lib/verify.sh so fix-round.sh and the behaviour
+# tests use the SAME parser the loop does. It used to be duplicated there with a
+# python-unittest-only grep, which read a Swift receipt as "0 failures" and
+# called a broken build a pass.
+# shellcheck source=lib/verify.sh
+. "$HERE/lib/verify.sh"
+
 DRY_RUN=0
 MAX_ITERS=${MAX_ITERS:-40}
-VISIBLE_CMD="${VISIBLE_CMD:-bash factory/tests/run-visible.sh}"
+# VISIBLE_CMD/HELDOUT_CMD/BUILD_CMD/HELDOUT_DIR arrive from
+# scripts/lib/toolchain.sh (sourced by status.sh). Defaulting them again here is
+# how two answers to "where are the tests" could coexist.
 REPAIR_CAP="${REPAIR_CAP:-2}"
 RESAMPLE_N="${RESAMPLE_N:-3}"
 NO_PROGRESS_LIMIT="${NO_PROGRESS_LIMIT:-3}"
+# The ladder's resample rung may carry its own N. Keep the operator's value so
+# each task re-derives from it instead of compounding the previous task's rung.
+RESAMPLE_N_DEFAULT="${RESAMPLE_N:-3}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -46,7 +59,15 @@ salvage() {
     echo "[nightshift] killed with uncommitted work — salvaging to $br" >&2
     git checkout -q -b "$br" 2>/dev/null
     # -A is deliberate here and ONLY here: salvage must lose nothing.
-    git add -A && git commit -q -m "factory: salvage WIP from interrupted night shift" 2>/dev/null
+    #
+    # EXCEPT the sandbox directory. A leftover .foreman-sandbox/ (from a
+    # --keep-sandbox run, or from running the loop in the main checkout while a
+    # sealed launch sits next to it) is a nested git WORKTREE, and `git add -A`
+    # records it as a gitlink — a mode-160000 entry with no submodule config.
+    # The branch then looks like it contains a project inside the project, and
+    # the next `git add` of that path fails outright. Losing nothing means losing
+    # no WORK, not preserving a checkout artifact.
+    git add -A -- . ':(exclude).foreman-sandbox' && git commit -q -m "factory: salvage WIP from interrupted night shift" 2>/dev/null
     log_append "nightshift" "salvage" "$br"
   fi
   rm -rf "$WORKDIR"
@@ -91,9 +112,18 @@ next_task() {
 }
 
 all_resolved() {
-  local id
-  for id in $(task_ids); do task_resolved "$id" || return 1; done
-  return 0
+  # A night with NO task files is not "all tasks resolved" — it is a night that
+  # never saw the plan. This function used to return 0 on an empty list, so when
+  # bootstrap's artifacts were uncommitted (and therefore absent from the sealed
+  # worktree, which is built from HEAD) the loop exited in one iteration reporting
+  # `all tasks resolved` and STATUS: DONE, and the launch printed 0 commits as
+  # though a night had happened. Zero inputs must be a BLOCKED condition.
+  local id n=0
+  for id in $(task_ids); do
+    n=$((n + 1))
+    task_resolved "$id" || return 1
+  done
+  [ "$n" -gt 0 ]
 }
 
 # --- verification ----------------------------------------------------------
@@ -132,103 +162,6 @@ task_verify_cmd() {
   case "$v" in ""|"-") printf '%s' "$VISIBLE_CMD" ;; *) printf '%s' "$v" ;; esac
 }
 
-test_counts() { # crude pass/total from the receipt, best-effort
-  # No `|| echo 0`: grep -c prints 0 and exits 1 when it matches nothing, which
-  # would append a second zero and corrupt the progress.md line.
-  local out="$1" p t ran
-  # Swift/XCTest: "Executed N tests, with M failures" — last occurrence is the
-  # "All tests" rollup, same reason as swift_fail_count.
-  ran=$(grep -oE 'Executed [0-9]+ tests?, with' "$out" 2>/dev/null | tail -1 | grep -oE '[0-9]+')
-  if [ -n "$ran" ]; then
-    printf '%s/%s' "$(( ran - $(fail_count "$out") ))" "$ran"; return
-  fi
-  ran=$(grep -oE '^Ran ([0-9]+) test' "$out" 2>/dev/null | grep -oE '[0-9]+' | head -1)
-  if [ -n "$ran" ]; then
-    printf '%s/%s' "$(( ran - $(fail_count "$out") ))" "$ran"; return
-  fi
-  p=$(grep -cE '^(ok|PASS|passed)' "$out" 2>/dev/null); p="${p:-0}"
-  t=$(grep -cE '^(ok|not ok|PASS|FAIL)' "$out" 2>/dev/null); t="${t:-0}"
-  [ "$t" = "0" ] && { printf '?/?'; return; }
-  printf '%s/%s' "$p" "$t"
-}
-
-# swift_fail_count <receipt> : failing checks from `swift test` / `xcodebuild
-# test`, or non-zero return if this receipt is not Swift at all.
-#
-# Three properties of real Swift output that a naive parser gets wrong:
-#
-#  1. XCTest prints "Executed N tests, with M failures" once per suite AND
-#     again for the "All tests" rollup — summing them multiplies the count.
-#     Take the LAST occurrence, which is the rollup.
-#  2. Swift 6 runs swift-testing alongside XCTest and prints its own line even
-#     for an XCTest-only package ("Test run with 0 tests ... passed"). Reading
-#     that line as the whole result reports success while XCTest is failing.
-#     The two frameworks are counted separately and ADDED.
-#  3. A compile failure produces NO count line at all. That must fall through
-#     to the exit code, never to zero.
-swift_fail_count() {
-  local out="$1" total=0 found=0 n
-  # 1. XCTest rollup — last occurrence only.
-  n=$(grep -oE 'Executed [0-9]+ tests?, with [0-9]+ failure' "$out" 2>/dev/null \
-      | tail -1 | sed -E 's/.*with ([0-9]+) failure.*/\1/')
-  if [ -n "$n" ]; then total=$((total + n)); found=1; fi
-  # 2. swift-testing, which reports "issues" rather than failures.
-  if grep -qE 'Test run with .*failed.*with [0-9]+ issue' "$out" 2>/dev/null; then
-    n=$(grep -oE 'with [0-9]+ issue' "$out" 2>/dev/null | tail -1 | grep -oE '[0-9]+')
-    total=$((total + ${n:-1})); found=1
-  elif grep -qE 'Test run with .*passed' "$out" 2>/dev/null; then
-    found=1
-  fi
-  # 3. xcodebuild banner: a backstop when the Executed line is absent or 0 but
-  #    the run still failed (a crashed bundle, a failed build phase).
-  if grep -q '\*\* TEST FAILED \*\*' "$out" 2>/dev/null; then
-    [ "$total" = "0" ] && total=1
-    found=1
-  fi
-  [ "$found" = "1" ] || return 1
-  printf '%s' "$total"
-}
-
-# fail_count <receipt> : how many checks are currently failing.
-# 0 when the suite is green. Falls back to the exit code when the format is
-# unrecognised, so an unparseable receipt is never mistaken for success.
-fail_count() {
-  local out="$1" n g=0
-  # The extra gate is a failing CHECK, counted alongside the tests. It has to
-  # enter the arithmetic or it is invisible: a task that breaks the invariant
-  # while keeping the suite green would score 0 against a baseline of 0 and
-  # read as "no regression". Counting it means breaking the invariant IS a
-  # regression, while an invariant already broken before the task started
-  # stays that task's inherited problem — the same rule as every other check.
-  if grep -q '^\*\* EXTRA GATE FAILED \*\*' "$out" 2>/dev/null; then g=1; fi
-  # Swift first: its receipts contain no unittest/TAP markers, so there is no
-  # ambiguity, and a Swift build failure must reach the exit-code fallback
-  # rather than being read as a green suite.
-  if n=$(swift_fail_count "$out"); then printf '%s' "$((n + g))"; return; fi
-  # python unittest: "FAILED (failures=3, errors=1)"
-  n=$(grep -oE '(failures|errors)=[0-9]+' "$out" 2>/dev/null | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')
-  if [ -n "$n" ] && [ "$n" != "0" ]; then printf '%s' "$((n + g))"; return; fi
-  grep -qE '^OK\b|^OK$' "$out" 2>/dev/null && { printf '%s' "$g"; return; }
-  # TAP. No `|| echo 0` here: grep -c already prints 0 when it matches nothing,
-  # and it exits 1 doing so, which would append a second zero.
-  n=$(grep -cE '^not ok' "$out" 2>/dev/null); n="${n:-0}"
-  if [ "$n" != "0" ]; then printf '%s' "$((n + g))"; return; fi
-  grep -qE '^ok ' "$out" 2>/dev/null && { printf '%s' "$g"; return; }
-  printf '%s' "${LAST_TEST_RC:-1}"
-}
-
-# The night shift builds a system incrementally: a walking skeleton cannot make
-# the whole suite green, and later tasks turn on the rest. Demanding an all-green
-# suite after every task would park every task but the last. The real rule is
-# NO REGRESSION — a task must not break a check that was already passing, and the
-# suite must reach zero failures by the end (the inspector enforces that).
-verify_ok() { # verify_ok <baseline_failures> <current_failures> <exit_rc>
-  local base="$1" cur="$2" rc="$3"
-  [ "$rc" = "0" ] && return 0                 # fully green: always fine
-  [ "$cur" = "127" ] && return 1              # no runner at all
-  [ "$cur" -le "$base" ] 2>/dev/null && return 0
-  return 1
-}
 
 # --- worker prompt ---------------------------------------------------------
 
@@ -258,15 +191,20 @@ build_prompt() { # build_prompt <task_id> [repair_context_file]
   printf 'End your response with the FACTORY_STATUS block.\n'
 }
 
-attempt() { # attempt <task_id> <outfile> [repair_ctx] -> executor exit
-  local id="$1" out="$2" repair="${3:-}" prompt
+attempt() { # attempt <task_id> <outfile> [repair_ctx] [role] -> exit status
+  # The role defaults to executor but is set by the escalation ladder: rung 1 is
+  # the planner, rung 2 the plan_judge, rung 3 the local fallback. Whoever the
+  # rung names, that family is recorded as an AUTHOR of the tree — the inspector
+  # picks its judge from that set, which is the only way "Opus fixed it, Opus
+  # judged it" can be caught.
+  local id="$1" out="$2" repair="${3:-}" role="${4:-executor}" prompt
   prompt="$(build_prompt "$id" "$repair")"
   if [ "$DRY_RUN" = "1" ]; then
-    status_emit "night-task" "$id" "DONE" "dry-run: no executor invoked" \
+    status_emit "night-task" "$id" "DONE" "dry-run: no $role invoked" \
       "TESTS: 0/0" "FILES: -" "EXIT_SIGNAL: false" > "$out"
     return 0
   fi
-  run_role executor "$prompt" > "$out" 2>>factory/log.md
+  run_role "$role" "$prompt" > "$out" 2>>factory/log.md
 }
 
 # --- resample: N parallel worktrees, execution-selected --------------------
@@ -342,10 +280,105 @@ resample() { # resample <task_id> -> 0 if a winner was merged
   return 1
 }
 
+# --- escalation ladder -----------------------------------------------------
+#
+# climb_ladder <task_id> <status_file> <test_receipt> -> 0 when the verify now
+# passes, 1 when every rung was spent.
+#
+# Rung 0 is the resample the loop already ran, so this starts at index 1. Each
+# rung is a NEW HYPOTHESIS, chosen by routing.yaml / models.env:
+#
+#   single:planner      the model that wrote the spec, with tools
+#   single:plan_judge   a third family
+#   single:fallback     a fourth family, local, for when hosted quota dies
+#
+# Two invariants the old code did not have:
+#   * The ladder fires on a VERIFY FAILURE and nothing else (may_escalate).
+#   * Before a rung runs, the tree is reset to the task's baseline. Otherwise a
+#     failed planner attempt leaves its damage for the next family to trip over,
+#     and the baseline count no longer describes what is on disk.
+climb_ladder() { # climb_ladder <task_id> <SF> <TO> <task_cmd> <base_fails> [start_rung]
+  local id="$1" sf="$2" to="$3" cmd="$4" base="$5"
+  local rung_spec strategy role out rc fails i
+  i="${6:-1}"
+  while rung_spec="$(ladder_rung "$i")"; do
+    strategy="$(rung_field "$rung_spec" 1)"
+    role="$(rung_field "$rung_spec" 2)"
+    if ! may_escalate "verify_failure"; then
+      log_append "nightshift" "ladder_refused" "$id rung $i reason_not_verify_failure"
+      return 1
+    fi
+    # An unset role command must SKIP, not fail. `role_cmd` prints the empty
+    # string and returns 0 for `GLUE_CMD=''`, so testing the exit status alone
+    # let unconfigured rungs through to run_role, which then produced no status
+    # block and burned the rung.
+    if [ -z "$(role_cmd "$role" 2>/dev/null)" ]; then
+      echo "[nightshift] $id: ladder rung $i ($role) has no command — skipping" >&2
+      log_append "nightshift" "ladder_skip" "$id rung $i $role unconfigured"
+      i=$((i + 1)); continue
+    fi
+    echo "[nightshift] $id: escalation rung $i — $strategy via $role ($(role_family "$role"))" >&2
+    log_append "nightshift" "ladder_start" "$id rung $i $strategy $role"
+    # Reset the tree to the pre-task state so this family starts where the
+    # baseline was measured. factory/ is excluded for the same reason the park
+    # path excludes it: the diary belongs to the loop, not to the task.
+    git checkout -q -- . ':(exclude)factory' 2>/dev/null
+    git clean -qfd --exclude=factory 2>/dev/null
+    out="$WORKDIR/$id.rung$i"
+    attempt "$id" "$out" "$to" "$role"
+    if ! status_valid "$out" 2>/dev/null; then
+      echo "[nightshift] $id: rung $i ($role) returned no status block" >&2
+      log_append "nightshift" "ladder_no_status" "$id rung $i $role"
+      i=$((i + 1)); continue
+    fi
+    if [ "$(status_field "$out" STATUS)" != "DONE" ]; then
+      log_append "nightshift" "ladder_blocked" "$id rung $i $role $(status_field "$out" STATUS)"
+      i=$((i + 1)); continue
+    fi
+    run_visible "$to" "$cmd"; rc=$?; LAST_TEST_RC=$rc
+    fails="$(fail_count "$to")"
+    if verify_ok "$base" "$fails" "$rc"; then
+      echo "[nightshift] $id: rung $i ($role) cleared the verify ($fails failing vs $base)" >&2
+      log_append "nightshift" "ladder_win" "$id rung $i $role family $(role_family "$role")"
+      # The rung's own status block becomes the task's: commit_task reads FILES
+      # from it, and the summary line records which family actually shipped it.
+      cp "$out" "$sf"
+      record_author_family "$(role_family "$role")"
+      return 0
+    fi
+    echo "[nightshift] $id: rung $i ($role) still failing ($fails vs baseline $base)" >&2
+    log_append "nightshift" "ladder_fail" "$id rung $i $role $fails vs $base"
+    record_author_family "$(role_family "$role")"
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # --- commit ----------------------------------------------------------------
 
 commit_task() { # commit_task <task_id> <status_file> -> prints SHA or -
+  # Seal enforcement, at the one point where the loop still has authority.
+  #
+  # Only when the launcher DECLARED the tree sealed (BODEGA_SEALED=1, set by
+  # `foreman launch`). A plain nightshift.sh run in the main checkout has no
+  # sparse patterns to check, so requiring them there would refuse every commit
+  # and break a path that works today.
+  #
+  # What it catches: a worker that loosens the seal mid-task — `git
+  # sparse-checkout disable`, measured — cannot then have its work committed.
+  # The task parks and log.md records seal_broken: evidence, not a shrug.
+  # Detection, not containment; the README states the difference.
   local id="$1" sf="$2" files f added=0
+  if [ "${SEAL_MODE:-none}" = "physical" ] && ! seal_intact "$FACTORY_ROOT"; then
+    echo "[nightshift] SEAL NOT INTACT — refusing to commit $id" >&2
+    log_append "nightshift" "seal_broken" "$id heldout=$HELDOUT_DIR"
+    # A DISTINCT sentinel. Returning "-" here would land in the empty-diff
+    # branch and park the task as "no file changes produced" — a wrong
+    # diagnosis for a security event, and one that also feeds the no-progress
+    # circuit breaker, so a broken seal could quietly stop the whole night.
+    printf '%s' "SEAL_BROKEN"
+    return 1
+  fi
   files="$(status_field "$sf" FILES)"
   if [ -z "$files" ] || [ "$files" = "-" ]; then
     files="$(task_field "$id" "Boundary")"
@@ -364,6 +397,27 @@ commit_task() { # commit_task <task_id> <status_file> -> prints SHA or -
 
 state_set "NIGHT_SHIFT" "loop started at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 log_append "nightshift" "start" "max_iters=$MAX_ITERS dry_run=$DRY_RUN"
+# Report the ACTUAL seal state, measured, not the flag we were handed. A launcher
+# can set BODEGA_SEALED=1 and still point at a tree where the exam is readable
+# (wrong FACTORY_ROOT, a failed sparse-checkout, an older git), and asserting
+# "sealed" from a flag is how the hole stayed invisible: every log line claimed
+# the seal was verified while the patterns had never been written at all.
+if [ -e "$FACTORY_ROOT/$HELDOUT_DIR" ]; then
+  SEAL_MODE="NONE"
+  echo "[nightshift] seal: NONE -- $HELDOUT_DIR is readable in $FACTORY_ROOT" >&2
+  echo "[nightshift]        every worker can read its own exam." >&2
+  echo "[nightshift]        run 'bash scripts/foreman.sh launch' for a sealed night." >&2
+  log_append "nightshift" "unsealed" "FACTORY_ROOT=$FACTORY_ROOT dir=$HELDOUT_DIR"
+elif [ "${BODEGA_SEALED:-0}" = "1" ] && seal_intact "$FACTORY_ROOT"; then
+  SEAL_MODE="physical"
+  echo "[nightshift] seal: PHYSICAL -- sparse-checkout excludes $HELDOUT_DIR, re-checked at each commit" >&2
+else
+  SEAL_MODE="unverified"
+  echo "[nightshift] seal: $HELDOUT_DIR is absent but no sparse patterns are active" >&2
+  echo "[nightshift]        absence may only mean the exam board has not run yet." >&2
+fi
+export SEAL_MODE
+
 
 no_progress=0
 iters=0
@@ -381,6 +435,19 @@ while [ "$iters" -lt "$MAX_ITERS" ]; do
   fi
 
   TASK="$(next_task)" || {
+    if [ -z "$(task_ids)" ]; then
+      # Not a deadlock: this tree has no plan at all. Almost always means the
+      # bootstrap artifacts were never committed, because a sealed worktree is
+      # built from HEAD and sees nothing that only exists in the main checkout's
+      # working directory.
+      echo "[nightshift] FATAL: no factory/tasks/*.md in $FACTORY_ROOT" >&2
+      echo "[nightshift]        the plan is not in this tree. If you launched a" >&2
+      echo "[nightshift]        sealed night, HEAD is what it got — commit the" >&2
+      echo "[nightshift]        bootstrap artifacts (factory/) and relaunch." >&2
+      log_append "nightshift" "blocked" "no task files in tree (plan not committed?)"
+      state_set "BLOCKED" "no factory/tasks/*.md — nothing to run (uncommitted plan?)"
+      break
+    fi
     if all_resolved; then
       echo "[nightshift] all tasks resolved, awaiting EXIT_SIGNAL — exiting" >&2
       log_append "nightshift" "exit" "all resolved (no EXIT_SIGNAL)"
@@ -453,15 +520,48 @@ while [ "$iters" -lt "$MAX_ITERS" ]; do
     CUR="$(fail_count "$TO")"
   done
 
+  # Escalation. The ladder is data, not code: rung 0 is the resample, later
+  # rungs are other families. Every rung that runs is recorded as an authoring
+  # family so the inspector can refuse to be judged by the one that wrote it.
+  record_author_family "$(role_family executor)"
   if ! verify_ok "$BASE_FAILS" "$CUR" "$TRC"; then
-    if resample "$TASK"; then
+    # Walk the ladder from rung 0. Whichever rung has already spent itself here
+    # (resample, or a single-role attempt) re-verifies and the loop stops the
+    # moment the gate passes — so the ladder cannot skip a rung or run one twice.
+    rung=0
+    while ! verify_ok "$BASE_FAILS" "$CUR" "$TRC"; do
+      rung_spec="$(ladder_rung "$rung")" || break
+      strategy="$(rung_field "$rung_spec" 1)"
+      role="$(rung_field "$rung_spec" 2)"
+      rung=$((rung + 1))
+      if ! may_escalate "verify_failure"; then
+        log_append "nightshift" "ladder_refused" "$TASK reason_not_verify_failure"
+        break
+      fi
+      if [ "$strategy" = "resample" ]; then
+        # The rung's N wins over the global default for this task. Not `local`:
+        # this block is the top-level loop, where `local` is a bash error.
+        rung_n="$(rung_field "$rung_spec" 3)"
+        RESAMPLE_N="${rung_n:-${RESAMPLE_N_DEFAULT:-3}}"
+        if resample "$TASK"; then
+          run_visible "$TO" "$TASK_CMD"; TRC=$?; LAST_TEST_RC=$TRC
+          CUR="$(fail_count "$TO")"
+        fi
+        continue
+      fi
+      # Re-verify AFTER the climb no matter how it returned. climb_ladder keeps
+      # its own rc/fails as locals, so skipping this left TRC/CUR holding the
+      # pre-climb values: a rung that WON was then parked as a regression, which
+      # is exactly what test-ladder.sh caught.
+      climb_ladder "$TASK" "$SF" "$TO" "$TASK_CMD" "$BASE_FAILS" "$((rung - 1))" || true
       run_visible "$TO" "$TASK_CMD"; TRC=$?; LAST_TEST_RC=$TRC
       CUR="$(fail_count "$TO")"
-    fi
+      break   # climb_ladder walks the remaining rungs itself
+    done
   fi
 
   if ! verify_ok "$BASE_FAILS" "$CUR" "$TRC"; then
-    progress_append "$TASK" "PARKED" "-" "$(test_counts "$TO")" "regression: $CUR failing vs $BASE_FAILS at task start, after $REPAIR_CAP repairs + resample N=$RESAMPLE_N"
+    progress_append "$TASK" "PARKED" "-" "$(test_counts "$TO")" "regression: $CUR failing vs $BASE_FAILS at task start, after $REPAIR_CAP repairs + escalation ladder ($(ladder_length) rungs)"
     log_append "nightshift" "park" "$TASK verification failed"
     # Throw away the failed task's edits — but NOT factory/. progress.md and
     # log.md are tracked, so a bare `git checkout -- .` reverts the park record
@@ -473,6 +573,16 @@ while [ "$iters" -lt "$MAX_ITERS" ]; do
   fi
 
   SHA="$(commit_task "$TASK" "$SF")"
+  if [ "$SHA" = "SEAL_BROKEN" ]; then
+    # Stop the night rather than continue in a tree that just proved it can
+    # reach its own exam: every later task would be executed in the same tree.
+    echo "[nightshift] halting: the held-out seal was broken during $TASK" >&2
+    progress_append "$TASK" "PARKED" "-" "$(test_counts "$TO")" \
+      "seal broken mid-task: $HELDOUT_DIR became reachable — night halted, inspect before rerunning"
+    log_append "nightshift" "halt" "$TASK seal_broken"
+    state_set "BLOCKED" "held-out seal broken during $TASK; see factory/log.md"
+    break
+  fi
   if [ "$SHA" = "-" ]; then
     no_progress=$((no_progress + 1))
     echo "[nightshift] $TASK: empty diff ($no_progress/$NO_PROGRESS_LIMIT)" >&2

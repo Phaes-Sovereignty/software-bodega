@@ -18,7 +18,10 @@ make_repo() { # make_repo <dir> <stub-behavior>
   local d="$1" behavior="$2"
   rm -rf "$d"; mkdir -p "$d/scripts/lib" "$d/factory/tasks" "$d/factory/tests/visible" "$d/skills/night-task"
   cp "$SRC/scripts/nightshift.sh" "$d/scripts/"
-  cp "$SRC/scripts/lib/status.sh" "$d/scripts/lib/"
+  # The whole lib, not just status.sh: status.sh sources lib/toolchain.sh, and a
+  # missing library file there means VISIBLE_CMD never gets its default and the
+  # loop dies on `set -u` before the first task.
+  cp "$SRC"/scripts/lib/*.sh "$d/scripts/lib/"
   echo "worker skill" > "$d/skills/night-task/SKILL.md"
   : > "$d/factory/progress.md"; : > "$d/factory/log.md"
   printf 'STAGE: IDLE\nPOINTER: -\n' > "$d/factory/STATE.md"
@@ -95,7 +98,12 @@ echo "nightshift loop semantics"
 # fail_count must never mistake an unparseable receipt for a green suite, and
 # verify_ok encodes the no-regression rule the incremental build depends on.
 # shellcheck disable=SC1090
-source <(sed -n '/^fail_count()/,/^}/p;/^verify_ok()/,/^}/p;/^swift_fail_count()/,/^}/p' "$SRC/scripts/nightshift.sh")
+# Source the real library, not a sed-extracted copy of functions that have since
+# moved. Extracting by name silently tests nothing once the definitions live in
+# scripts/lib/verify.sh — the sed returns empty and every assertion below would
+# compare against an undefined function.
+# shellcheck disable=SC1091
+source "$SRC/scripts/lib/verify.sh"
 _fc() { printf '%s\n' "$2" > "$TMPFC"; local got; got="$(LAST_TEST_RC=${3:-1} fail_count "$TMPFC")"
         [ "$got" = "$1" ] && ok "fail_count: $4" || bad "fail_count: $4 (want $1, got $got)"; }
 TMPFC="$(mktemp)"

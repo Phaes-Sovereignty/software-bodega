@@ -15,6 +15,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/status.sh"
 cd "$FACTORY_ROOT" || exit 1
 
+# The receipt parser is shared with the night loop (scripts/lib/verify.sh) rather
+# than re-typed here. This script counted failures with a python-unittest-only
+# grep, which finds no `failures=N` marker in a Swift receipt and so reports ZERO
+# failures for any output. The regression test below compares 0 against 0 and
+# passes: a fix round that broke the suite, or failed to compile it at all, was
+# credited with a clean result and committed. A gate that cannot see the failure
+# it exists to catch is worse than no gate, because it looks like one.
+. "$HERE/lib/verify.sh"
+
 MAX_ROUNDS=2
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,8 +51,8 @@ while [ "$round" -lt "$MAX_ROUNDS" ]; do
 
   BEFORE="$(git rev-parse HEAD)"
   TO="$(mktemp)"; SF="$(mktemp)"
-  bash factory/tests/run-visible.sh > "$TO" 2>&1; LAST_TEST_RC=$?
-  BASE_FAILS="$(grep -oE '(failures|errors)=[0-9]+' "$TO" | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')"
+  run_visible_suite "$TO"; LAST_TEST_RC=$?
+  BASE_FAILS="$(fail_count "$TO")"
 
   run_role executor "$(
     cat skills/night-task/SKILL.md
@@ -57,7 +66,7 @@ while [ "$round" -lt "$MAX_ROUNDS" ]; do
     printf '\n===== INSPECTOR FINDINGS =====\n'
     sed -n '1,120p' factory/REVIEW.md
     printf '\n===== CONTRACT =====\n'; cat factory/CONTRACT.md
-    printf '\n===== HOW TO VERIFY YOUR OWN WORK =====\nRun: bash factory/tests/run-visible.sh\n'
+    printf '\n===== HOW TO VERIFY YOUR OWN WORK =====\nRun: %s\n' "$VISIBLE_CMD"
     printf 'It must not regress: %s check(s) fail right now.\n' "${BASE_FAILS:-0}"
     printf '\nWork in %s. Edit source files directly. Do not commit.\n' "$FACTORY_ROOT"
     printf 'End with the FACTORY_STATUS block, STATION: fix-round.\n'
@@ -68,9 +77,14 @@ while [ "$round" -lt "$MAX_ROUNDS" ]; do
     log_append "fix-round" "bad_status" "round $round"; rm -f "$SF" "$TO"; continue
   fi
 
-  # verification: no regression on the visible suite
-  bash factory/tests/run-visible.sh > "$TO" 2>&1; RC=$?
-  AFTER_FAILS="$(grep -oE '(failures|errors)=[0-9]+' "$TO" | grep -oE '[0-9]+' | awk '{s+=$1} END{print s+0}')"
+  # verification: no regression on the visible suite.
+  # fail_count from the shared parser. The old inline grep returned 0 for a Swift
+  # receipt, so a round that REGRESSED compared 0 > 0, saw no regression, and
+  # committed the damage. Both numbers must come from the same function the night
+  # loop uses or the two gates disagree about what "worse" means.
+  run_visible_suite "$TO"; RC=$?
+  LAST_TEST_RC=$RC
+  AFTER_FAILS="$(fail_count "$TO")"
   if [ "$RC" != "0" ] && [ "${AFTER_FAILS:-1}" -gt "${BASE_FAILS:-0}" ]; then
     echo "[fix] round $round REGRESSED (${AFTER_FAILS} failing vs ${BASE_FAILS}) — reverting" >&2
     git checkout -q -- . 2>/dev/null
@@ -78,10 +92,41 @@ while [ "$round" -lt "$MAX_ROUNDS" ]; do
   fi
 
   # tamper guard: a fix round may not touch the exams or the contract
-  if ! git diff --quiet -- factory/tests factory/CONTRACT.md 2>/dev/null; then
-    echo "[fix] round $round TAMPERED with exams/contract — reverting those paths" >&2
-    git checkout -q -- factory/tests factory/CONTRACT.md 2>/dev/null
-    log_append "fix-round" "tamper_reverted" "round $round"
+  #
+  # `git diff` tolerates a pathspec that does not exist; `git checkout` ERRORS on
+  # one and reverts nothing. Handing checkout the declared dirs plus the default
+  # `factory/tests` therefore silently no-ops in every Swift project — the
+  # tampered exam stays in the tree and the next lines commit it. Filter to paths
+  # that exist, and only run checkout when at least one does.
+  existing_pathspecs GUARD "$VISIBLE_DIR" "$HELDOUT_DIR" factory/tests factory/CONTRACT.md
+  # `git diff` only sees TRACKED files. A worker that writes a brand-new file into
+  # the exam directory — the cheapest way to "fix" a failing check — is invisible
+  # to it, and the selective commit below would happily `git add` it by name from
+  # the FILES line. So check untracked paths under the guarded dirs as well.
+  UNTRACKED=""
+  if [ "${#GUARD[@]}" -gt 0 ]; then
+    # NO --exclude-standard: the held-out directory is usually in .gitignore (the
+    # README tells you to put it there so the builder cannot commit it), and
+    # --exclude-standard would hide precisely the files this check exists to find.
+    UNTRACKED="$(git ls-files --others -- "${GUARD[@]}" 2>/dev/null)"
+  fi
+  if [ -n "$UNTRACKED" ]; then
+    echo "[fix] round $round ADDED files under the exams — removing: $(printf '%s' "$UNTRACKED" | tr '\n' ' ')" >&2
+    printf '%s\n' "$UNTRACKED" | while IFS= read -r u; do [ -n "$u" ] && rm -f -- "$u"; done
+    log_append "fix-round" "tamper_untracked_removed" "round $round $(printf '%s' "$UNTRACKED" | tr '\n' ' ')"
+  fi
+  if [ "${#GUARD[@]}" -gt 0 ] && ! git diff --quiet -- "${GUARD[@]}" 2>/dev/null; then
+    echo "[fix] round $round TAMPERED with exams/contract — reverting: ${GUARD[*]}" >&2
+    git checkout -q -- "${GUARD[@]}" 2>/dev/null
+    log_append "fix-round" "tamper_reverted" "round $round paths=${GUARD[*]}"
+    # If the revert could not be performed, say so instead of continuing as if
+    # the exam were clean.
+    if ! git diff --quiet -- "${GUARD[@]}" 2>/dev/null; then
+      echo "[fix] round $round REVERT FAILED — halting, exam still modified" >&2
+      log_append "fix-round" "tamper_unreverted" "round $round"
+      rm -f "$SF" "$TO"
+      break
+    fi
   fi
 
   # selective commit

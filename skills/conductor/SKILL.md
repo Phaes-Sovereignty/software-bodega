@@ -38,7 +38,7 @@ Write `factory/BRIEF.md`, print it, and ask the human to sign:
 "Does this describe what you want? (sign / edit)". **◉ Do not continue without
 a yes.**
 
-### 2. Spec → Blueprint → Exams → Work order → Plan review (scripts)
+### 2. Spec → Blueprint → Toolchain → Exams → Work order → Plan review (scripts)
 
 ```bash
 nohup bash scripts/bootstrap.sh --from spec > /tmp/bodega-boot.log 2>&1 &
@@ -62,15 +62,28 @@ never let anything else edit it.
 rejection is the gate working. It revises twice on its own. If it escalates,
 summarise the objections in plain language and ask the human how to proceed.
 
-### 3. Night shift (script, unattended)
+### 3. Night shift (foreman launch, unattended)
 
 ```bash
-nohup bash scripts/nightshift.sh > /tmp/bodega-night.log 2>&1 &
+nohup python3 -m foreman --root . launch --max-iters 25 > /tmp/bodega-night.log 2>&1 &
 ```
 
-One task per fresh context. Tell the human they can close the laptop lid on a
-desktop, or leave it running, and check back. Report progress from
-`factory/progress.md`, which is the truth — not the log chatter.
+**Launch the night through the foreman, never `scripts/nightshift.sh` directly.**
+The difference is the seal: `launch` builds a sparse-checkout worktree in which
+the held-out suite is *physically absent*, and it puts the night's commits on a
+named branch you can inspect and merge. Calling `nightshift.sh` by hand runs the
+workers in the main checkout, where the exam files are sitting right there and
+the only thing protecting them is a sentence in a prompt — and a prompt does not
+stop a model that can `cat`. (Measured: workers reach around the tool gate and
+write outside the project directory.)
+
+If `python3 -m foreman` is genuinely unavailable (no PyYAML), say so out loud,
+run `nightshift.sh` **in a sealed worktree you create yourself**, and tell the
+human the seal was manual. Do not silently fall back to the unsealed path.
+
+One task per fresh context. Report progress from `factory/progress.md`, which is
+the truth — not the log chatter. Then merge or inspect the branch `launch`
+printed.
 
 ### 4. Inspection (script)
 
@@ -102,8 +115,9 @@ held-out exam, a flaky test: say so plainly and say what it means for them.
 ## Things that will bite you
 
 - **Never `git add -A`** outside the salvage path. Add specific files.
-- **`factory/tests/heldout/` is held out.** Do not read it, quote it, or use it
-  to explain a failure to the worker. If you can see it, say so — that is a bug.
+- **The held-out suite is held out** (`HELDOUT_DIR`; ask
+  `bash scripts/toolchain.sh get HELDOUT_DIR`). Do not read it, quote it, or use
+  it to explain a failure to the worker. If you can see it, say so — that is a bug.
 - **A missing status block is a transport failure**, not a task failure. The
   scripts retry. Do not conclude a task failed because one call dropped.
 - **Never weaken a test to make something pass.** If a test looks wrong, stop

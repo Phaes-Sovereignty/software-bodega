@@ -14,7 +14,9 @@ scripts/nightshift.sh, which keeps its own semantics. The Small Loop
 from __future__ import annotations
 
 import argparse
+import os
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -23,7 +25,8 @@ from pathlib import Path
 from . import gates as G
 from . import steps as S
 from .breakers import Breakers
-from .contracts import Store, Verdict, create_sealed_worktree, remove_worktree
+from .contracts import (Store, Verdict, create_sealed_worktree, heldout_dir,
+                        read_toolchain, remove_worktree, verify_seal)
 from .fsm import FSM, REQUIRED, GateNotPassed, IllegalTransition
 from .ledger import CeilingExceeded, Ledger
 from .notify import Notifier
@@ -58,9 +61,18 @@ def _bootstrap(args):
 
 def cmd_init(args) -> int:
     root, router, store, fsm, ledger, br, note = _bootstrap(args)
-    for d in ("factory/.planning/gate-results", "factory/.steps", "factory/tasks",
-              "factory/tests/visible", "factory/tests/heldout"):
+    for d in ("factory/.planning/gate-results", "factory/.steps", "factory/tasks"):
         (root / d).mkdir(parents=True, exist_ok=True)
+    # The suite directory created here is the one the PROJECT declares, not the
+    # constant this function used to hard-code. Pre-making factory/tests/heldout
+    # in a Swift package leaves an empty directory that makes the seal test pass
+    # vacuously — it proves the seal removed something, and that something was
+    # never the exam.
+    tc = read_toolchain(root)
+    hdir = heldout_dir(root)
+    (root / hdir).mkdir(parents=True, exist_ok=True)
+    print(f"  held-out directory: {hdir}"
+          + ("" if tc else "  (default — no factory/toolchain.env yet)"))
     print(f"Software Bodega — foreman init — {root}")
     try:
         router.validate()
@@ -226,6 +238,68 @@ def _plan_review(root: Path, router: Router, store: Store, ledger: Ledger):
                         [] if approved else [verdict_line or "rejected"])
 
 
+# The loop's own records: the append-only diary, the station pointer, the
+# per-rung author log, and the station journal. None of them are a task's
+# boundary files, so commit_task never stages them.
+DIARY_PATHS = ("factory/progress.md", "factory/STATE.md",
+               "factory/.planning/author-families.txt", "factory/log.md")
+
+
+def publish_diary(root: Path, sandbox: Path) -> list[str]:
+    """Land the night's diary on the branch, then mirror it into the main checkout.
+
+    Without this the sealed path throws away the two things the morning depends
+    on. `commit_task` stages only that task's boundary files, so progress.md,
+    STATE.md and author-families.txt stay uncommitted in the sandbox, and
+    `remove_worktree` deletes them with it. Measured consequences:
+
+      * inspect.sh finds no `|DONE|` row, so BASE falls back to the ROOT commit
+        and the scope/tamper audit diffs the entire history instead of the night.
+      * author-families.txt is gone, so the judge is chosen against
+        `role_family executor` rather than the family that actually shipped the
+        code -- which is exactly the case the escalation ladder exists to create.
+
+    Selective add, explicit paths, never -A (hard rule 6).
+    """
+    published: list[str] = []
+    existing = [rel for rel in DIARY_PATHS if (sandbox / rel).exists()]
+    if not existing:
+        return published
+    # 1. Onto the branch, so the artifact the human inspects carries its own diary.
+    subprocess.run(["git", "-C", str(sandbox), "add", "--", *existing],
+                   capture_output=True, text=True, check=False)
+    dirty = subprocess.run(["git", "-C", str(sandbox), "diff", "--cached", "--quiet"],
+                           capture_output=True, text=True, check=False)
+    if dirty.returncode != 0:
+        msg = "factory: night diary (progress, state, author families)"
+        r = subprocess.run(["git", "-C", str(sandbox), "commit", "-q", "-m", msg],
+                           capture_output=True, text=True, check=False)
+        if r.returncode == 0:
+            published += existing
+        else:
+            print(f"  diary commit failed: {(r.stderr or r.stdout).strip()[:160]}")
+    # 2. Mirror into the main checkout so the conductor can report progress and
+    # so a failed commit still leaves a readable trail. Only overwrite a file
+    # that the human has not edited, and only when the sandbox copy is longer
+    # (the diary is append-only, so growth is the real case).
+    for rel in existing:
+        dst = root / rel
+        try:
+            if dst.exists():
+                local = subprocess.run(["git", "-C", str(root), "diff", "--quiet", "--", rel],
+                                       capture_output=True, text=True, check=False)
+                if local.returncode != 0:
+                    print(f"  {rel} has uncommitted edits in the main checkout — left alone")
+                    continue
+                if dst.stat().st_size >= (sandbox / rel).stat().st_size:
+                    continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(sandbox / rel, dst)
+        except OSError as e:
+            print(f"  diary mirror failed for {rel}: {e}")
+    return published
+
+
 def cmd_launch(args) -> int:
     root, router, store, fsm, ledger, br, note = _bootstrap(args)
     if br.is_open:
@@ -241,25 +315,65 @@ def cmd_launch(args) -> int:
         note.stop(f"preflight failed: {e}")
         return 1
 
-    # Seal the night: the worker sandbox has no held-out tests on disk.
+    # Seal the night: the worker sandbox has no held-out tests on disk. This is
+    # the physical seal the design always claimed for the night shift and never
+    # had — the conductor used to call scripts/nightshift.sh directly, which runs
+    # in the MAIN checkout where the held-out suite is readable, and the only
+    # thing standing between a builder and its own exam was a sentence in a
+    # prompt. Launch through here instead.
+    #
+    # The sealed directory comes from the PROJECT (factory/toolchain.env), not
+    # from a constant, so a Swift package seals Tests/HeldoutTests.
     wt = None
+    branch = None
+    hdir = heldout_dir(root)
     if args.sealed:
         wt = root / ".foreman-sandbox"
         remove_worktree(root, wt)
+        # A NAMED BRANCH, not a detached HEAD: the night commits per task, and on
+        # a detached worktree those commits belong to a tree that disappears when
+        # the sandbox is pruned. The branch is what makes "the results survive"
+        # true — the human merges it, exactly as in the Small Loop.
+        branch = args.branch or time.strftime("bodega/night-%Y%m%dT%H%M%SZ", time.gmtime())
+        base_sha = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                                  capture_output=True, text=True).stdout.strip()
         try:
-            create_sealed_worktree(root, wt, heldout=router.path("heldout"))
-            print(f"sealed sandbox: {wt} (held-out physically absent)")
+            create_sealed_worktree(root, wt, heldout=hdir, branch=branch)
+            verify_seal(wt, hdir)
+            print(f"sealed sandbox: {wt}")
+            print(f"  held-out dir physically absent: {hdir}")
+            print(f"  night commits land on branch:   {branch}")
         except Exception as e:
             print(f"sealing failed: {e}")
             return 1
+    else:
+        print("UNSEALED: the night runs in the main checkout and workers can read "
+              f"{hdir}. Only do this for a dry run.")
 
     workdir = wt or root
     t0 = time.time()
-    rc = subprocess.call(["bash", str(root / "scripts/nightshift.sh"),
-                          "--max-iters", str(args.max_iters)], cwd=str(workdir))
+    # Run the SANDBOX's own nightshift.sh with FACTORY_ROOT pinned to the sandbox.
+    # Both halves matter: nightshift.sh derives FACTORY_ROOT from the path of the
+    # script it was invoked as and then `cd`s there, so invoking the MAIN
+    # checkout's script with cwd=<sandbox> would move the whole night back into
+    # the unsealed tree — a seal that reports itself verified while every worker
+    # is sitting next to its own exam.
+    ns_script = (workdir / "scripts/nightshift.sh")
+    if not ns_script.exists():
+        ns_script = root / "scripts/nightshift.sh"
+    env = {**os.environ, "FACTORY_ROOT": str(workdir)}
+    if wt:
+        # Declares the tree sealed, so commit_task re-checks the sparse patterns
+        # before every commit and refuses to land work from a tree that loosened
+        # its own seal mid-task. Not set for --unsealed, where there is
+        # nothing to check and the guard would reject every commit.
+        env["BODEGA_SEALED"] = "1"
+    rc = subprocess.call(["bash", str(ns_script), "--max-iters", str(args.max_iters)],
+                         cwd=str(workdir), env=env)
     ledger.record(station="NIGHT_SHIFT", role="executor",
                   model=router.role("executor").model, rounds=1,
                   wall_s=round(time.time() - t0, 2), note=f"nightshift rc={rc}")
+    ceiling_hit = False
     try:
         for w in ledger.check():
             print(f"  warning: {w}")
@@ -267,11 +381,31 @@ def cmd_launch(args) -> int:
         print(f"  {e}")
         note.stop(str(e))
         br.trip(str(e))
-        return 1
-    if wt and not args.keep_sandbox:
-        print("sandbox left in place for inspection" if rc else "removing sandbox")
-        if not rc:
+        ceiling_hit = True
+
+    if wt:
+        # Publish the diary BEFORE the report and before the sandbox is removed.
+        published = publish_diary(root, wt)
+        if published:
+            print("diary published to " + branch + ": " + ", ".join(published))
+
+        # Report the branch BEFORE touching the sandbox: if anything goes wrong
+        # from here the work is still reachable by name.
+        head = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", branch],
+                              capture_output=True, text=True).stdout.strip()
+        ncommits = subprocess.run(
+            ["git", "-C", str(root), "rev-list", "--count", f"{base_sha}..{branch}"],
+            capture_output=True, text=True).stdout.strip()
+        print(f"night branch: {branch} (head {head or '?'}, {ncommits or '0'} new commit(s))")
+        print(f"  inspect it:  git -C {root} log --oneline {base_sha[:12]}..{branch}")
+        print(f"  then run:    bash scripts/inspect.sh   # from the branch worktree")
+        if args.keep_sandbox or rc or ceiling_hit:
+            print(f"sandbox left in place for inspection: {wt}")
+        else:
             remove_worktree(root, wt)
+            print(f"sandbox removed; branch {branch} keeps the work")
+    if ceiling_hit:
+        return 1
     return rc
 
 
@@ -342,6 +476,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="run the night in a worktree with held-out tests absent")
     q.add_argument("--unsealed", dest="sealed", action="store_false")
     q.add_argument("--keep-sandbox", action="store_true")
+    q.add_argument("--branch", default=None,
+                   help="branch for the night's commits (default: bodega/night-<UTC timestamp>)")
     q.add_argument("--webhook", default=None)
     q.set_defaults(fn=cmd_launch)
     q = sub.add_parser("resume"); q.add_argument("--station", default=None); q.set_defaults(fn=cmd_resume)

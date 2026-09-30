@@ -31,7 +31,8 @@ from foreman.contracts import (Store, Verdict, content_sha,       # noqa: E402
 from foreman.fsm import (FSM, TRANSITIONS, STATIONS, REQUIRED,    # noqa: E402
                          IllegalTransition, GateNotPassed)
 from foreman.ledger import Ledger, CeilingExceeded                # noqa: E402
-from foreman.router import Router, FamilyViolation                # noqa: E402
+from foreman.router import (Router, FamilyViolation, parse_ladder,   # noqa: E402
+                           read_models_env)
 from foreman.workers import (Workers, WorkOrder, parse_status_block,  # noqa: E402
                              ContractTestFailed, Adapter)
 
@@ -247,6 +248,73 @@ class TestRouter(unittest.TestCase):
         self.assertTrue(r.may_escalate("verify_failure"))
         for excuse in ("low_confidence", "slow", "agent_requested"):
             self.assertFalse(r.may_escalate(excuse))
+
+    # --- the ladder must be ONE source, and Python must actually read it -----
+    # It used to live only in routing.yaml, which nightshift.sh cannot parse, so
+    # the ladder was dead config: Router.escalate() had no caller and every
+    # parked task parked at rung 0.
+
+    def test_ladder_is_read_from_models_env(self):
+        r = Router()
+        ladder = r.escalation_ladder()
+        self.assertGreaterEqual(len(ladder), 4,
+                                "escalation ladder is empty — models.env is not being read")
+        self.assertEqual(ladder[0]["strategy"], "resample")
+        self.assertEqual(ladder[0]["n"], 3)
+        self.assertEqual(ladder[0]["select"], "execution")
+        self.assertEqual([x["role"] for x in ladder[1:]], ["planner", "plan_judge", "fallback"])
+
+    def test_routing_yaml_cannot_declare_a_second_ladder(self):
+        r = Router()
+        cfg = dict(r.cfg)
+        cfg["escalation"] = {"ladder": [{"strategy": "single", "role": "executor"}]}
+        with self.assertRaises(ValueError):
+            Router(config=cfg).escalation_ladder()
+
+    def test_ladder_agrees_with_the_shell_string(self):
+        """Both readers parse the SAME models.env line; a drift is a bug."""
+        import re, subprocess
+        spec = Router().models["ESCALATION_LADDER"]
+        rungs = parse_ladder(spec)
+        shell = subprocess.run(
+            ["bash", "-c",
+             'SRC="$1"; . "$SRC/scripts/lib/status.sh"; '
+             'for i in $(seq 0 $(( $(ladder_length) - 1 ))); do '
+             '  r="$(ladder_rung $i)"; printf "%s:%s\n" "$(rung_field "$r" 1)" "$(rung_field "$r" 2)"; '
+             'done', "_", str(ROOT)],
+            capture_output=True, text=True, check=True).stdout.strip().splitlines()
+        py = [f"{x['strategy']}:{x['role']}" for x in rungs]
+        self.assertEqual(py, shell, "Python and shell disagree about the ladder")
+
+    def test_judge_roles_come_from_the_same_file(self):
+        self.assertEqual(Router().judge_roles(),
+                         Router().models["JUDGE_ROLES"].split())
+
+    # --- judge selection against the family that ACTUALLY wrote the code -----
+
+    def test_judge_for_family_picks_a_different_family(self):
+        r = Router()
+        self.assertEqual(r.judge_for_family(r.family("executor")), "judge")
+        # anthropic authors (planner, and the judge role) must not be judged by
+        # the judge role — that is the "Opus fixes, Opus judges" bug.
+        self.assertNotEqual(r.judge_for_family("anthropic"), "judge")
+        self.assertNotEqual(r.family(r.judge_for_family("anthropic")), "anthropic")
+
+    def test_judge_for_family_honours_every_author(self):
+        r = Router()
+        role = r.judge_for_family("xai,anthropic")
+        self.assertNotIn(r.family(role), {"xai", "anthropic"})
+
+    def test_judge_for_family_refuses_instead_of_self_grading(self):
+        """Every judge family authored -> raise. Falling back would grade itself."""
+        r = Router()
+        authors = [r.family(role) for role in r.judge_roles()]
+        with self.assertRaises(FamilyViolation):
+            r.judge_for_family(authors)
+
+    def test_judge_for_family_rejects_an_empty_author_set(self):
+        with self.assertRaises(FamilyViolation):
+            Router().judge_for_family([])
 
 
 # ------------------------------------------------------------- ledger ------

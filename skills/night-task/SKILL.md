@@ -39,7 +39,7 @@ You have no memory of other tasks and you do not need any.
   not the tolerance. If a visible test looks wrong, emit `STATUS: BLOCKED` and
   quote it. Weakening a check is the one unrecoverable failure here.
 - **Never modify `factory/CONTRACT.md`.** It is signed.
-- **`factory/tests/heldout/` does not exist in your environment.** Do not look
+- **The held-out suite (`HELDOUT_DIR` from `factory/toolchain.env`) does not exist in your environment.** Do not look
   for it, do not reference it, do not write tests into it. If you can see that
   directory, stop and report it — the seal is broken and that is a bug worth
   more than this task.

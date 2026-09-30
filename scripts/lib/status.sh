@@ -16,15 +16,22 @@ set -uo pipefail
 FACTORY_ROOT="${FACTORY_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 export FACTORY_ROOT
 
+# Callers normally set HERE before sourcing; derive it when they do not so this
+# file is safe to source standalone (CI, the behaviour tests).
+: "${HERE:=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+
 # shellcheck disable=SC1091
 [ -f "$FACTORY_ROOT/models.env" ] && . "$FACTORY_ROOT/models.env"
 
-# Optional per-project toolchain profile: how THIS project is built and
-# verified (VISIBLE_CMD, HELDOUT_CMD, EXTRA_GATE_CMD, BUILD_CMD). Separate from
-# models.env, which says who does the work. A project with no profile falls
-# back to factory/tests/run-visible.sh, which is what the exam board writes.
+# Per-project toolchain profile: how THIS project is built and verified
+# (VISIBLE_CMD, HELDOUT_CMD, HELDOUT_DIR, BUILD_CMD, EXTRA_GATE_CMD). Separate
+# from models.env, which says who does the work. toolchain.sh owns the defaults
+# AND the one question that used to be answered differently in six places: where
+# the held-out suite lives. Source it instead of sourcing toolchain.env directly,
+# or you get the project's declarations without the fallbacks that make them
+# safe to eval.
 # shellcheck disable=SC1091
-[ -f "$FACTORY_ROOT/factory/toolchain.env" ] && . "$FACTORY_ROOT/factory/toolchain.env"
+. "$HERE/lib/toolchain.sh"
 
 STATUS_VALID_STATES="DONE BLOCKED NEEDS_CONTEXT"
 
@@ -165,6 +172,105 @@ role_input_mode() {
     fallback)   printf '%s' "${FALLBACK_INPUT:-arg}" ;;
     *) printf 'stdin' ;;
   esac
+}
+
+# --- escalation ladder ----------------------------------------------------
+#
+# The ladder used to exist only in foreman/routing.yaml, which the night shift
+# cannot read, and Router.escalate() had no caller. Result: nightshift.sh ran
+# repair -> resample -> PARK and the planner rung, the plan_judge rung and the
+# local fallback were pure decoration.
+#
+# Format (models.env:ESCALATION_LADDER): space-separated rungs,
+# each `strategy:role[:n[:select]]`.
+
+ladder_length() {
+  local n=0 r
+  for r in ${ESCALATION_LADDER:-}; do n=$((n + 1)); done
+  printf '%s' "$n"
+}
+
+# ladder_rung <index> : echo the rung spec, or empty past the end.
+ladder_rung() {
+  local want="$1" i=0 r
+  for r in ${ESCALATION_LADDER:-}; do
+    if [ "$i" = "$want" ]; then printf '%s' "$r"; return 0; fi
+    i=$((i + 1))
+  done
+  return 1
+}
+
+# rung_field <spec> <n> : the n-th ':'-separated field of a rung spec.
+rung_field() { printf '%s' "$1" | cut -d: -f"$2"; }
+
+# may_escalate <reason> : the ladder fires on a verify failure and nothing else.
+# Not a low-confidence self-report, not elapsed time, not an agent asking — all
+# three are things a failing worker can manufacture. Mirrors Router.may_escalate.
+may_escalate() {
+  local trigger
+  trigger="${ESCALATION_TRIGGER:-verify_failure_only}"
+  [ "$trigger" = "verify_failure_only" ] && { [ "${1:-}" = "verify_failure" ] && return 0 || return 1; }
+  return 0
+}
+
+# --- who actually wrote the code ------------------------------------------
+#
+# progress.md's 5th field is a free-text note; the author family needs to be
+# machine-readable because the inspector picks its judge from the UNION of
+# families that touched the night's accepted commits. Kept as a set file so a
+# 40-task night records 40 lines and the inspector still reads one list.
+AUTHOR_SET_FILE="factory/.planning/author-families.txt"
+
+record_author_family() { # record_author_family <family>
+  local fam="$1" f="$FACTORY_ROOT/$AUTHOR_SET_FILE"
+  [ -n "$fam" ] || return 0
+  mkdir -p "$(dirname "$f")" 2>/dev/null
+  grep -qxF "$fam" "$f" 2>/dev/null && return 0
+  printf '%s\n' "$fam" >> "$f"
+}
+
+author_families() { # -> comma-separated set, empty if none recorded
+  local f="$FACTORY_ROOT/$AUTHOR_SET_FILE"
+  [ -f "$f" ] || return 0
+  tr '\n' ',' < "$f" | sed 's/,$//'
+}
+
+# --- judge selection against the family that ACTUALLY wrote the code -------
+#
+# Hard rule 2 says a judge must be a different family from the author. Checking
+# `judge` against `executor` once at startup does not hold when the author is
+# whoever the escalation ladder happened to use: if Opus fixes the code and the
+# judge role is also Opus, the system grades its own homework and the verdict
+# looks exactly like a real one.
+#
+# So the judge is chosen PER VERDICT, from JUDGE_ROLES, against the family that
+# produced the change. Returns 2 when no cross-family judge is configured — the
+# caller must then refuse to judge, never fall back to a same-family one.
+judge_for_family() { # judge_for_family <author_family[,family...]> -> role name
+  local authors="$1" role fam bad
+  [ -n "$authors" ] || { echo "judge_for_family: empty author family list" >&2; return 2; }
+  for role in ${JUDGE_ROLES:-judge}; do
+    fam="$(role_family "$role" 2>/dev/null)" || continue
+    [ -n "$fam" ] || continue
+    bad=0
+    for a in $(printf '%s' "$authors" | tr ',' ' '); do
+      [ "$fam" = "$a" ] && bad=1
+    done
+    if [ "$bad" = "0" ]; then printf '%s' "$role"; return 0; fi
+  done
+  echo "no judge role configured outside the authoring families ($authors)" >&2
+  return 2
+}
+
+# assert_judge_for JUDGE_ROLE AUTHOR_FAMILY : hard rule 2, evaluated at call time.
+assert_judge_for() {
+  local jf
+  jf="$(role_family "$1" 2>/dev/null)" || { echo "unknown judge role $1" >&2; return 2; }
+  if [ "$jf" = "$2" ]; then
+    echo "FAMILY VIOLATION: judge '$1' ($jf) shares a family with the author ($2)" >&2
+    return 1
+  fi
+  return 0
 }
 
 # run_role ROLE PROMPT : invoke a role headless, print normalized model text.

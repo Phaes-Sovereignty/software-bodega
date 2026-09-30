@@ -5,8 +5,11 @@ description: Artifact-only review of a night's work — contract vs diff vs test
 
 # Station: INSPECTOR
 
-Role: **judge**. Must be a different family than the **executor**
-(`assert_cross_family judge executor`). Output: `factory/REVIEW.md`.
+Role: **judge**. Must be a different family than **whichever role actually wrote
+the code under review** — the driver selects it from `JUDGE_ROLES` against
+`factory/.planning/author-families.txt`, because the escalation ladder lets the
+planner or plan_judge ship the change. A judge that shares a family with an
+author is refused, not downgraded. Output: `factory/REVIEW.md`.
 
 ## Artifact-only context — what you may and may not read
 
@@ -26,10 +29,21 @@ A test that passes then fails (or vice versa) is **flaky**, and a flaky green is
 a **finding**, not a pass. Name the test and quarantine it.
 
 ### 2. Held-out exams
-Run `factory/tests/heldout/`. These are the checks the builder never saw. A
-failure here means the implementation satisfied the letter of the visible tests
-without the underlying behavior — say exactly which held-out check failed and
-which task's code caused it.
+Run the held-out suite. Its directory and command are the project's, not a
+default: `bash scripts/toolchain.sh get HELDOUT_DIR` and `get HELDOUT_CMD`
+(`factory/tests/heldout` for a stdlib Python project, `Tests/HeldoutTests` and
+`swift test --manifest-cache none --filter HeldoutTests` for SwiftPM).
+
+`scripts/inspect.sh` runs this for you and puts the receipt in your context with
+its exit code. If that receipt says the suite could not run (exit 127, or the
+directory is absent), that is **NOT DONE**, not a pass: an exam that never ran is
+indistinguishable from an exam that passed, which is exactly how the compiled
+toolchain lost this mechanism while every log said it was enforced.
+
+These are the checks the builder never saw. A failure here means the
+implementation satisfied the letter of the visible tests without the underlying
+behavior — say exactly which held-out check failed and which task's code caused
+it.
 
 ### 3. Tamper audit
 Did anything touch what it must not?

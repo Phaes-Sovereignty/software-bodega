@@ -24,6 +24,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 import schemas  # noqa: E402
 
+from .contracts import DEFAULT_HELDOUT, read_toolchain  # noqa: E402
+
 
 @dataclass
 class GateResult:
@@ -215,22 +217,65 @@ def _run(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, str]:
         return 127, f"could not execute: {e}"
 
 
-def exam_gate(root: Path, runner: str = "factory/tests/run-visible.sh",
+DEFAULT_RUNNERS = {"visible": "factory/tests/run-visible.sh",
+                   "heldout": "factory/tests/run-heldout.sh"}
+
+
+def suite_command(root: Path, kind: str) -> tuple[str, str | None]:
+    """Resolve the command that runs a suite, from the PROJECT's toolchain.
+
+    Returns (command, missing_path). `missing_path` is non-None only when the
+    command is the default runner script and that script does not exist — which
+    is missing evidence, and a gate must fail on missing evidence rather than
+    report a 127 as though a test had run.
+
+    Before this, exam_gate/heldout_gate took a runner PATH with a hard-coded
+    default, so a Swift project — whose suites are `swift test --filter …` —
+    either failed the gate for lacking a shell script it should never have
+    needed, or was checked by a script that verified nothing.
+    """
+    tc = read_toolchain(Path(root))
+    cmd = (tc.get(f"{kind.upper()}_CMD") or "").strip()
+    if not cmd:
+        runner = DEFAULT_RUNNERS[kind]
+        if not (Path(root) / runner).exists():
+            return f"bash {runner}", runner
+        return f"bash {runner}", None
+    return cmd, None
+
+
+def _run_shell(cmd: str, cwd: Path, timeout: int) -> tuple[int, str]:
+    try:
+        r = subprocess.run(["bash", "-c", cmd], cwd=str(cwd), capture_output=True,
+                           text=True, timeout=timeout)
+        return r.returncode, (r.stdout + r.stderr)
+    except subprocess.TimeoutExpired:
+        return 124, "TIMEOUT"
+    except OSError as e:
+        return 127, f"could not execute: {e}"
+
+
+def exam_gate(root: Path, runner: str | None = None,
               timeout: int = 1800, runs: int = 2) -> GateResult:
     """Run the visible suite TWICE. A flaky green is a finding, not a pass.
 
     The foreman runs this itself rather than believing a reported result — the
     exit code is the evidence, and it is only evidence if we produced it.
+
+    The command is the project's VISIBLE_CMD when it declares one, so a Swift
+    night is gated on `swift test --filter VisibleTests` and not on a shell
+    script the project does not have.
     """
     root = Path(root)
-    rp = root / runner
-    if not rp.exists():
+    cmd, missing = (f"bash {runner}", None if (root / runner).exists() else runner) \
+        if runner else suite_command(root, "visible")
+    if missing:
         # Missing evidence is not a pass.
-        return GateResult.fail("exam", [f"no visible runner at {runner} — cannot prove green"])
+        return GateResult.fail("exam", [f"no visible runner at {missing} — cannot prove green"])
 
     codes, logs = [], []
     for _ in range(runs):
-        rc, out = _run(["bash", str(rp)], root, timeout)
+        rc, out = _run_shell(cmd, root, timeout)
         codes.append(rc)
         logs.append(out[-4000:])
 
@@ -245,17 +290,29 @@ def exam_gate(root: Path, runner: str = "factory/tests/run-visible.sh",
     return GateResult.ok("exam", exits=codes, runs=runs)
 
 
-def heldout_gate(root: Path, runner: str = "factory/tests/run-heldout.sh",
+def heldout_gate(root: Path, runner: str | None = None,
                  timeout: int = 1800) -> GateResult:
+    """Run the HELD-OUT suite. Never from a sealed tree — the files are gone there.
+
+    This is the gate that did not exist in the night path at all: HELDOUT_CMD was
+    declared and read by nobody, so the mechanism the whole design rests on was
+    Python-only by accident.
+    """
     root = Path(root)
-    rp = root / runner
-    if not rp.exists():
-        return GateResult.fail("heldout", [f"no held-out runner at {runner} — cannot prove green"])
-    rc, out = _run(["bash", str(rp)], root, timeout)
+    cmd, missing = (f"bash {runner}", None if (root / runner).exists() else runner) \
+        if runner else suite_command(root, "heldout")
+    if missing:
+        return GateResult.fail("heldout", [f"no held-out runner at {missing} — cannot prove green"])
+    hdir = read_toolchain(root).get("HELDOUT_DIR") or DEFAULT_HELDOUT
+    if not (root / hdir).is_dir():
+        return GateResult.fail(
+            "heldout",
+            [f"held-out suite directory {hdir} is absent — cannot prove the held-out checks ran"])
+    rc, out = _run_shell(cmd, root, timeout)
     if rc != 0:
         return GateResult.fail("heldout", [f"held-out suite failed: exit {rc}"],
                                exit=rc, log=out[-4000:])
-    return GateResult.ok("heldout", exit=rc)
+    return GateResult.ok("heldout", exit=rc, command=cmd, heldout_dir=hdir)
 
 
 ALL_GATES = {
