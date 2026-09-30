@@ -65,10 +65,11 @@ summarise the objections in plain language and ask the human how to proceed.
 ### 3. Night shift (foreman launch, unattended)
 
 ```bash
-nohup python3 -m foreman --root . launch --max-iters 25 > /tmp/bodega-night.log 2>&1 &
+nohup bash scripts/foreman.sh launch --max-iters 25 > /tmp/bodega-night.log 2>&1 &
 ```
 
-**Launch the night through the foreman, never `scripts/nightshift.sh` directly.**
+**Launch the night through `scripts/foreman.sh`, never `scripts/nightshift.sh`
+directly.**
 The difference is the seal: `launch` builds a sparse-checkout worktree in which
 the held-out suite is *physically absent*, and it puts the night's commits on a
 named branch you can inspect and merge. Calling `nightshift.sh` by hand runs the
@@ -77,9 +78,17 @@ the only thing protecting them is a sentence in a prompt — and a prompt does n
 stop a model that can `cat`. (Measured: workers reach around the tool gate and
 write outside the project directory.)
 
-If `python3 -m foreman` is genuinely unavailable (no PyYAML), say so out loud,
-run `nightshift.sh` **in a sealed worktree you create yourself**, and tell the
-human the seal was manual. Do not silently fall back to the unsealed path.
+Use `scripts/foreman.sh` and not `python3 -m foreman`: the foreman needs an
+interpreter that can import yaml, and the machine's default python3 frequently
+cannot. That is not a hypothetical — `python3 -m foreman` dies at import, the
+conductor falls back to `nightshift.sh`, and a missing package silently costs the
+seal. `foreman.sh` resolves the interpreter itself and refuses loudly if none can
+do the job.
+
+If it refuses (no PyYAML anywhere), say so out loud, install it or run the loop
+**in a sealed worktree you create yourself** (the refusal message prints the
+exact commands), and tell the human the seal was manual. Do not silently fall
+back to the unsealed path.
 
 One task per fresh context. Report progress from `factory/progress.md`, which is
 the truth — not the log chatter. Then merge or inspect the branch `launch`

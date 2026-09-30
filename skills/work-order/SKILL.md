@@ -57,22 +57,38 @@ answers the questions it would otherwise waste a turn asking:
 
 ## Orientation Q&A
 **Where does the code live?** ...
-**How do I run the visible tests?** `<exact command>`
-**How do I build?** `<exact command>`
+**How do I run the visible tests?** `$VISIBLE_CMD`, verbatim from toolchain.env
+**How do I build?** `$BUILD_CMD`, verbatim (omit the line if it is empty)
 **What am I allowed to touch?** Only the boundary listed in factory/tasks/<id>.md
 **What does done look like?** The task's `Verify:` command is no worse than the
 baseline taken before you started; status block emitted.
 **What if I get stuck?** Emit STATUS: BLOCKED with the specific error. Do not
-guess at scope. Do not touch factory/tests/heldout/ (it is not there).
+guess at scope. Do not touch `$HELDOUT_DIR` (it is not there).
+
+Quote the DECLARED values, not the defaults. HANDOFF.md is pasted into every
+worker prompt, so a `factory/tests/heldout/` written here reaches a Swift
+builder that has no such directory — and the real exam sits in
+`Tests/HeldoutTests` with nothing telling anyone not to read it.
 
 ## Slices
 <one section per slice, claim + file manifest + how to verify>
 ```
 
-## The verification gate — declared, not assumed
+## The verification gate — read, not written
 
 The night shift does not guess how this project is built. It reads
-`factory/toolchain.env`, which you write here from the answers above:
+`factory/toolchain.env`, written by **`scripts/toolchain.sh resolve`** at the
+TOOLCHAIN station, which runs **before the exam board** — the exam board has to
+be told where the held-out suite lives, and in a compiled project that is a
+build-manifest fact that cannot be decided afterwards.
+
+**You do not author `factory/toolchain.env`.** You read it and you must not
+contradict it. If the declared commands are wrong for the plan you are writing,
+that is a finding to raise in the plan review, not something to quietly patch
+here. (This skill used to tell you to write the file. That ordering is what let
+a Swift project receive Python exam instructions.)
+
+The values you will find there, and what they mean for your slices:
 
 ```bash
 VISIBLE_CMD='swift test --filter VisibleTests'          # the whole visible suite
@@ -82,6 +98,8 @@ EXTRA_GATE_CMD='bash scripts/check-target-graph.sh'     # optional, may be empty
 FACTORY_ROLE_TIMEOUT=5400                                # compiled builds are slow
 ```
 
+`HELDOUT_DIR` is the directory the seal removes; your slices must never place a
+file inside it, and a `file_manifest` naming it is an automatic REJECT.
 `VISIBLE_CMD` is the fallback for tasks whose `Verify:` is `-`; per-task
 commands come from `factory/tasks/<id>.md` and are usually a `--filter` slice of
 it. `EXTRA_GATE_CMD` runs after every verification and fails it on non-zero —

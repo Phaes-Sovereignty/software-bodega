@@ -61,8 +61,11 @@ Write the filter that matches the tests covering this task's `exam_refs`:
 | Node | `npm test -- tests/poller.test.js` |
 
 The command must be runnable from the repo root and must exercise **visible**
-tests only. Never reference `factory/tests/heldout/` — it is not in the
-builder's checkout, and a task whose verify command needs it can never pass.
+tests only. Never reference the held-out directory — `HELDOUT_DIR` from
+`factory/toolchain.env` (ask `bash scripts/toolchain.sh get HELDOUT_DIR`; it is
+`Tests/HeldoutTests` in a Swift package, not `factory/tests/heldout`). It is not
+in the builder's checkout, and a task whose verify command needs it can never
+pass.
 
 ## Risk and ADRs
 
@@ -101,7 +104,8 @@ considered / decision / consequences) and links it via `adr: "ADR-1"`.
 - [ ] every `risk: high` task has an `adr` that points at a file that exists
 - [ ] boundaries do not overlap between tasks that can run in parallel
 - [ ] every `verify` command names visible tests only — no path under
-      `factory/tests/heldout/` appears in any of them
+      `$HELDOUT_DIR` (as declared in `factory/toolchain.env`) appears in any
+      of them
 
 Also write `factory/tasks/<id>.md` per task — the night shift reads these, not
 the JSON. One `Key: value` per line, exactly these keys:
