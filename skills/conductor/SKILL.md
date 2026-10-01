@@ -34,6 +34,13 @@ Follow `skills/factory-interview/SKILL.md` exactly. One question at a time, each
 with a recommended answer. Stop when two engineers would ship the same
 behaviour — usually 5–9 questions.
 
+**Unless the human already handed you a brief.** If `factory/BRIEF.md` exists
+with real decisions in it and nothing has been run yet, the interview is done:
+read the brief, treat it as the source of truth, and go straight to step 2. Do
+not re-ask questions the brief already answers and do not rewrite it. If the
+brief is missing a section a gate needs, ask ONE question to fill that gap rather
+than inventing the answer.
+
 Write `factory/BRIEF.md`, print it, and ask the human to sign:
 "Does this describe what you want? (sign / edit)". **◉ Do not continue without
 a yes.**

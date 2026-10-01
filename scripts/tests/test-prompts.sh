@@ -284,5 +284,82 @@ else
   bad "work-order prompt never built: $(tail -3 "$O/o.log" | tr '\n' '|')"
 fi
 
+
+# --- 4. the conductor's opening instruction, per starting state ------------
+# start.sh picks one of three briefings from what is on disk. Getting this wrong
+# is not cosmetic: a prepared BRIEF.md used to be classed as "resume", whose
+# script ends "...tell the human where things stand, and ask what they want to do
+# next." Under --yolo there is nobody to answer, so an unattended run opened,
+# printed a status paragraph, and waited forever.
+#
+# Captured by stubbing omp to dump its argument, so this asserts the bytes the
+# conductor receives rather than the branching that produced them.
+SB="$(mktemp -d)/bin"; mkdir -p "$SB"
+printf '#!/usr/bin/env bash\nprintf "%%s" "${*:--}" > "$BODEGA_CAP"\n' > "$SB/omp"
+chmod +x "$SB/omp"
+
+mkstate() { # mkstate <name> <brief:yes|no> <progress-rows|-> <stage>
+  local d="$TMP/conductor-$1"; rm -rf "$d"; mkdir -p "$d/factory"
+  mkdir -p "$d/scripts/lib" "$d/skills/conductor" "$d/skills/factory-interview"
+  cp "$SRC/scripts/start.sh" "$d/scripts/"
+  cp "$SRC/skills/conductor/SKILL.md" "$d/skills/conductor/" 2>/dev/null || printf 'c\n' > "$d/skills/conductor/SKILL.md"
+  cp "$SRC/skills/factory-interview/SKILL.md" "$d/skills/factory-interview/" 2>/dev/null || printf 'i\n' > "$d/skills/factory-interview/SKILL.md"
+  [ "$2" = yes ] && printf '# BRIEF\n\n## Decisions made\n- D-1: x\n\n## Non-goals\n- NG-1: y\n\n## Riskiest part\nz\n' > "$d/factory/BRIEF.md"
+  [ "$3" = "-" ] && : > "$d/factory/progress.md" || printf 'T01|DONE|abc123|1/1|did it\n' > "$d/factory/progress.md"
+  printf 'STAGE: %s\nPOINTER: -\n' "$4" > "$d/factory/STATE.md"
+  : > "$d/factory/log.md"
+  printf '%s' "$d"
+}
+# --print writes the assembled prompt to stdout and exits without launching, so
+# the stub is never invoked on that path. Read stdout for the briefing itself, and
+# use the omp stub only to prove the real launch sends the same thing.
+capfor() { # capfor <dir> <extra args...> -> path to the captured prompt
+  local d="$1"; shift
+  ( cd "$d" && bash scripts/start.sh --print "$@" >"$d/cap.txt" 2>/dev/null )
+  printf '%s' "$d/cap.txt"
+}
+launchcap() { # launchcap <dir> <extra args...> -> path to what omp actually got
+  local d="$1"; shift
+  ( cd "$d" && BODEGA_CAP="$d/live.txt" PATH="$SB:$PATH" bash scripts/start.sh "$@" >/dev/null 2>&1 )
+  printf '%s' "$d/live.txt"
+}
+
+D1="$(mkstate empty no - INTERVIEW)"
+C1="$(capfor "$D1" --yolo)"
+grep -q "Begin the interview now" "$C1"   && ok "empty project: the conductor is told to interview" \
+  || bad "empty project did not get the interview opening"
+
+D2="$(mkstate handoff yes - INTERVIEW)"
+C2="$(capfor "$D2" --yolo)"
+grep -q "ALREADY DONE THE INTERVIEW" "$C2"   && ok "prepared brief: recognised as a HANDOFF, not a resume" \
+  || bad "a prepared brief with nothing run is not treated as a handoff"
+grep -q "ask what they want to do next" "$C2" \
+  && bad "the handoff briefing still ends by asking a human who is not there — a YOLO run would stall" \
+  || ok "the handoff briefing asks nothing of an absent human"
+grep -q "bootstrap.sh --from spec" "$C2" \
+  && ok "the handoff briefing names the command that starts the pipeline" \
+  || bad "handoff briefing never says how to start the run"
+
+D3="$(mkstate inflight yes done NIGHT_SHIFT)"
+C3="$(capfor "$D3" --yolo)"
+grep -q "ALREADY IN FLIGHT" "$C3" \
+  && ok "a project with a night behind it still resumes" \
+  || bad "in-flight detection regressed"
+grep -q "YOLO OVERRIDE" "$C3" \
+  && ok "resume + YOLO replaces the question with instructions to continue" \
+  || bad "resume under YOLO still ends on 'ask what they want to do next'"
+
+# --print must show the SAME briefing the real launch sends, or it is a probe
+# that lies: MODE="print" used to skip the detection and always claim "new".
+C2L="$(launchcap "$D2" --yolo)"
+[ -s "$C2L" ] && grep -q "ALREADY DONE THE INTERVIEW" "$C2L" \
+  && ok "the real launch sends the handoff briefing, not just --print" \
+  || bad "the real launch did not send the handoff briefing (cap: $(wc -c < "$C2L" 2>/dev/null || echo 0) bytes)"
+if [ "$(sed -n '/^Brief already written/,/^[[:space:]]*$/p' "$C2" | head -3)" = "$(sed -n '/^Brief already written/,/^[[:space:]]*$/p' "$C2L" | head -3)" ]; then
+  ok "--print reports the briefing the real launch actually sends"
+else
+  bad "--print and the real launch disagree about the starting state"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
